@@ -33,6 +33,7 @@
 - [JSON 输出](#json-输出)
 - [安全模型](#安全模型)
 - [与其他工具的区别](#与其他工具的区别)
+- [更新路线](#更新路线)
 - [更新日志](#更新日志)
 - [开发](#开发)
 
@@ -665,6 +666,40 @@ OperationAction -> OperationPlan -> Confirmation -> Executor -> Audit
 | 资源监控工具 | CPU、内存、网络实时指标 | 指标只是入口之一，同时覆盖诊断、恢复、审计 |
 | Web 管理平台 | 多节点 Web UI、Agent/Server | 本地单二进制，终端优先，无需服务端 |
 | Bash 脚本 | 简单命令封装 | 强类型模型、JSON 输出、TUI、测试覆盖和安全执行路径 |
+
+## 更新路线
+
+`dockerctl` 的路线会继续围绕“本地 Docker 日常运维 cockpit”推进，不追求做成重量级 Web 平台。
+
+### v0.2.x
+
+- 打磨 Ops Cockpit 视觉细节：更好的窄屏布局、面板密度、状态色和右键菜单体验。
+- 完善 Demo 模式：覆盖更多异常场景、资源错误、批量选择和安全确认演示。
+- 增强 Resource Monitor：增加项目级趋势快照、排序、高 CPU/高内存容器优先提示。
+- 提升日志面板：支持 TUI 内按容器切换、过滤关键字、高亮 error/warn。
+- 改进 release 体验：补充截图、录屏、安装包说明和 shell completion 文档。
+
+### v0.3.x
+
+- 引入 Recipes 编排：把常用动作流做成可复用的本地运维配方，例如 panic-stop、rescue-unhealthy、preflight-delete。
+- 增强 Timeline：把 Docker events、操作审计和健康变化聚合成更可读的事件流。
+- 增强 Doctor：加入端口冲突、匿名卷、孤儿网络、镜像膨胀、restart loop 等更细的诊断规则。
+- 完善 Profiles：支持用户自定义项目分组视图，让 standalone 容器也能按业务域管理。
+- 补齐更多 JSON schema 测试，稳定脚本化输出。
+
+### v0.4.x
+
+- 研究远程 Docker context 支持，优先保持本地 socket 的安全和低延迟体验。
+- 探索 Podman 兼容层，但不牺牲 Docker-first 的稳定性。
+- 增加可选历史指标文件，用于轻量趋势分析，不默认开启后台采集。
+- 加强安装体验：更多发行版预编译包、校验说明和自动补全安装。
+
+### 长期方向
+
+- 保持单二进制、无服务端、终端优先。
+- 继续强化“预演再执行”的安全模型。
+- 让 TUI 既适合日常使用，也适合 README、Release、演示和传播。
+- 优先做好本地 Docker 运维，不把项目扩张成复杂平台。
 
 ## 更新日志
 
