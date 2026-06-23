@@ -4,9 +4,10 @@ use dockerctl::config::{AppConfig, ThemeName};
 use dockerctl::domain::{Container, ContainerState, DockerSnapshot, OperationAction, SortMode};
 use dockerctl::resources::{ResourcePanelData, ResourceRow};
 use dockerctl::tui::{
-    apply_mouse_action, begin_execution_prompt, execution_plan_if_confirmed,
-    mark_resource_refresh_pending, mouse_action_for_event, push_execution_token, render_dashboard,
-    ContextMenuItem, ContextMenuState, DashboardState, MouseAction, TuiPanel,
+    apply_demo_execution, apply_mouse_action, begin_execution_prompt, demo_dashboard_state,
+    execution_plan_if_confirmed, mark_resource_refresh_pending, mouse_action_for_event,
+    push_execution_token, render_dashboard, ContextMenuItem, ContextMenuState, DashboardState,
+    MouseAction, TuiPanel,
 };
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::backend::TestBackend;
@@ -157,6 +158,57 @@ fn dashboard_renders_command_center_metrics_and_project_table() {
     assert!(rendered.contains("mingli"));
     assert!(rendered.contains("Ops Deck"));
     assert!(rendered.contains("unhealthy"));
+}
+
+#[test]
+fn cockpit_theme_renders_ops_cockpit_language() {
+    let snapshot = sample_snapshot();
+    let mut state = DashboardState::from_snapshot(snapshot, SortMode::Severity);
+    state.theme = ThemeName::Cockpit;
+
+    let backend = TestBackend::new(120, 36);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| render_dashboard(frame, &mut state))
+        .expect("draw");
+
+    let rendered = format!("{:?}", terminal.backend().buffer());
+
+    assert!(rendered.contains("OPS COCKPIT"));
+    assert!(rendered.contains("mode:all"));
+    assert!(rendered.contains("selected:0"));
+    assert!(rendered.contains("KPI"));
+}
+
+#[test]
+fn demo_dashboard_renders_mock_data_badge() {
+    let mut state = demo_dashboard_state();
+
+    let backend = TestBackend::new(130, 38);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| render_dashboard(frame, &mut state))
+        .expect("draw");
+
+    let rendered = format!("{:?}", terminal.backend().buffer());
+
+    assert!(rendered.contains("DEMO"));
+    assert!(rendered.contains("mock data"));
+    assert!(rendered.contains("api-gateway"));
+    assert!(rendered.contains("postgres-dev"));
+}
+
+#[test]
+fn demo_execution_only_updates_status() {
+    let mut state = demo_dashboard_state();
+    state.panel = TuiPanel::Plan(OperationAction::Restart);
+    begin_execution_prompt(&mut state);
+
+    apply_demo_execution(&mut state);
+
+    assert!(state.execution_prompt.is_none());
+    assert!(state.status.contains("demo mode"));
+    assert!(state.status.contains("execution skipped"));
 }
 
 #[test]

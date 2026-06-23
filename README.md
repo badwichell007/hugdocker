@@ -7,7 +7,7 @@
 面向 Linux 日常运维的高性能 Docker TUI/CLI。以项目为中心聚合 Compose、Stack 和 standalone 容器，提供资源监控、风险预演、安全执行、异常恢复、审计时间线和脚本化 JSON 输出。
 
 [![CI](https://github.com/badwichell007/dockerctl/actions/workflows/ci.yml/badge.svg)](https://github.com/badwichell007/dockerctl/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/badge/release-v0.2.0-0ea5e9)](https://github.com/badwichell007/dockerctl/releases)
+[![Release](https://img.shields.io/badge/release-v0.2.1-0ea5e9)](https://github.com/badwichell007/dockerctl/releases)
 [![Rust](https://img.shields.io/badge/Rust-2024-f97316)](https://www.rust-lang.org/)
 [![TUI](https://img.shields.io/badge/TUI-ratatui%20%2B%20crossterm-22c55e)](https://ratatui.rs/)
 [![Docker API](https://img.shields.io/badge/Docker%20API-bollard-2563eb)](https://github.com/fussybeaver/bollard)
@@ -66,18 +66,17 @@ select project -> inspect risk -> preview operation -> confirm safely -> audit r
 ## 界面预览
 
 ```text
-╭──────────────────────────── DOCKERCTL COMMAND CENTER ────────────────────────────╮
-│ mode:all  sort:Severity  filter:none        project-first docker ops             │
+╭──────────────────────────── OPS COCKPIT / DOCKERCTL ─────────────────────────────╮
+│ LIVE docker socket | mode:all selected:0 sort:Severity filter:none               │
 ╰──────────────────────────────────────────────────────────────────────────────────╯
-╭ Projects ─────────────────────────╮ ╭ Ops Deck / Resources ─────────────────────╮
-│ [x] UP    mcphub        compose   │ │ Resource Monitor | mcphub | refreshing    │
-│ [ ] RISK  api-gateway   compose   │ │ ╭ CPU ─────╮ ╭ MEM ─────╮ ╭ NET ─────╮   │
-│ [ ] DOWN  postgres-dev  standalone│ │ │ 12.5%    │ │ 48.1%    │ │ 4.2Mi/1M │   │
-│                                   │ │ ╰──────────╯ ╰──────────╯ ╰──────────╯   │
-│ right-click: manage project       │ │ State Container      CPU   MEM  NET  IO  │
-│ space: select  /: filter          │ │ UP    mcphub        0.0%  2.1% rx/tx r/w │
+╭ Projects / Risk Radar ────────────╮ ╭ Ops Deck / Resources / Resource Monitor ─╮
+│ Sel State Project       Run Ports │ │ KPI CPU   12.5%     KPI MEM 48.1%        │
+│ [x] [UP]  edge          2/2 1     │ │ KPI NET   4.2Mi/1M  KPI IO 163Mi/42Mi    │
+│ [ ] [RSTR] api-gateway  1/1 1     │ │ Resource Monitor | edge | refreshing     │
+│ [ ] [PAUS] postgres-dev 1/1 1     │ │ State Container      CPU   MEM  NET  IO  │
+│ right-click: manage project       │ │ UP    edge_web_1    12.5% 25.0% rx/tx    │
 ╰───────────────────────────────────╯ ╰──────────────────────────────────────────╯
-╭ Command Bar ────────────────────────────────────────────────────────────────────╮
+╭ Command Bar / Fast Ops ─────────────────────────────────────────────────────────╮
 │ mouse: click row select, right-click manage | m resources | Enter execute        │
 ╰──────────────────────────────────────────────────────────────────────────────────╯
 ```
@@ -119,7 +118,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ### 指定版本
 
 ```bash
-DOCKERCTL_VERSION=v0.2.0 curl -fsSL https://raw.githubusercontent.com/badwichell007/dockerctl/main/scripts/install.sh | bash
+DOCKERCTL_VERSION=v0.2.1 curl -fsSL https://raw.githubusercontent.com/badwichell007/dockerctl/main/scripts/install.sh | bash
 ```
 
 ### 源码安装
@@ -169,6 +168,14 @@ dockerctl completion fish > ~/.config/fish/completions/dockerctl.fish
 ```bash
 dockerctl
 ```
+
+无 Docker 环境先体验高级界面：
+
+```bash
+dockerctl demo
+```
+
+`demo` 使用内置 mock snapshot 和 mock resource data，不连接 Docker daemon，不执行真实 start/stop/restart/remove/purge/prune，也不会写入真实审计日志。
 
 列出项目：
 
@@ -222,6 +229,7 @@ dockerctl timeline --watch
 | 目标 | 命令 |
 | --- | --- |
 | 进入 TUI | `dockerctl` |
+| Demo 体验 | `dockerctl demo` |
 | 项目清单 | `dockerctl list --json` |
 | 风险诊断 | `dockerctl doctor --json` |
 | 资源采样 | `dockerctl stats <container> --json` |
@@ -238,15 +246,23 @@ dockerctl timeline --watch
 dockerctl
 ```
 
-TUI 采用 Command Center 布局：
+没有 Docker daemon 或想先看界面：
+
+```bash
+dockerctl demo
+```
+
+Demo 模式会在 Header 显示 `DEMO mock data`，允许打开 plan、doctor、logs、resources 等面板；执行确认只显示 `demo mode: execution skipped`，不会调用 Docker API。
+
+TUI 采用 Ops Cockpit 布局：
 
 | 区域 | 说明 |
 | --- | --- |
-| Header | 当前模式、排序方式、过滤条件 |
-| Metrics | 项目总数、活动项目、风险项目、已选项目 |
-| Projects | 项目列表，支持风险优先排序、多选和过滤 |
+| Header | 当前运行模式、排序方式、过滤条件、选中数量、LIVE/DEMO 状态 |
+| KPI Strip | 项目总数、活动项目、风险项目、已选项目、当前可见项目 |
+| Projects / Risk Radar | 项目列表，强化 State、Risk、Active、Ports 和选择状态 |
 | Ops Deck | 详情、诊断、日志入口、资源监视、风险预演、恢复预案 |
-| Command Bar | 当前状态、快捷键和执行提示 |
+| Command Bar / Fast Ops | 当前状态、快捷键和执行提示 |
 
 ### 鼠标操作
 
@@ -311,10 +327,10 @@ q 或 Esc      退出或取消当前确认
 
 | 指标 | 内容 |
 | --- | --- |
-| CPU | 当前项目容器 CPU 百分比汇总 |
-| MEM | 内存使用率和使用量/限制 |
+| CPU | 当前项目容器 CPU 百分比汇总，超过阈值会高亮 |
+| MEM | 内存使用率和使用量/限制，接近上限会高亮 |
 | NET | 网络 RX/TX 汇总 |
-| IO | block read/write 汇总 |
+| IO | block read/write 汇总和 stats 错误提示 |
 | Containers | 每个容器的 State、CPU、MEM%、NET rx/tx、IO r/w |
 
 刷新时会保留上一帧数据，并显示 `refreshing` 状态，避免资源页闪烁。
@@ -342,6 +358,14 @@ Remove / Purge / Prune
 危险动作会显示 `Safety Rail`，并要求输入确认令牌。鼠标点击不会直接执行删除或完全删除。
 
 ## CLI 使用教程
+
+### Demo 模式
+
+```bash
+dockerctl demo
+```
+
+Demo 模式用于 README、Release、社交媒体或没有 Docker daemon 的机器上快速展示 TUI。它只读取内置 mock 数据，不会连接 `/var/run/docker.sock`。
 
 ### 查看项目
 
@@ -497,7 +521,7 @@ dockerctl init-config
 refresh_ms = 2000
 log_tail = 200
 default_filter = ""
-theme = "industrial"
+theme = "cockpit"
 
 [safety]
 typed_confirmation = true
@@ -643,6 +667,14 @@ OperationAction -> OperationPlan -> Confirmation -> Executor -> Audit
 | Bash 脚本 | 简单命令封装 | 强类型模型、JSON 输出、TUI、测试覆盖和安全执行路径 |
 
 ## 更新日志
+
+### v0.2.1
+
+- 新增 `dockerctl demo`：使用内置 mock 项目和 mock resource data 启动 TUI，不需要 Docker daemon。
+- TUI 默认升级为 `cockpit` 主题：Header、KPI Strip、Projects / Risk Radar、Ops Deck 和 Command Bar 统一为 Ops Cockpit 视觉层级。
+- Demo 模式增加安全边界：可打开 plan、doctor、logs、resources 等界面，但执行确认只显示 mock-safe 状态，不调用 Docker API。
+- Resource Monitor 视觉增强：CPU/MEM/NET/IO 改为 cockpit KPI 指标块，loading、empty、error、refreshing 状态更直观。
+- 信息架构优化：Header 显示 LIVE/DEMO、mode、sort、filter、selection；项目表强化 state、risk、active、ports。
 
 ### v0.2.0
 

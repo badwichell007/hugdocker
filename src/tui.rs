@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 
 use crate::config::{parse_theme, ThemeName};
 use crate::docker::DockerClient;
-use crate::domain::{DockerSnapshot, OperationAction, Project, SortMode};
+use crate::domain::{Container, ContainerState, DockerSnapshot, OperationAction, Project, SortMode};
 use crate::health::{analyze_snapshot, global_findings};
 use crate::ops::{OperationPlan, OperationPlanner};
 use crate::resources::{format_bytes, ResourcePanelData, ResourceRow};
@@ -52,6 +52,12 @@ const CONTEXT_MENU_ITEMS: [ContextMenuItem; 10] = [
 
 pub async fn run(client: DockerClient) -> AppResult<()> {
     let mut app = TuiApp::new(client).await?;
+    let terminal = TerminalSession::enter()?;
+    app.run(terminal).await
+}
+
+pub async fn run_demo() -> AppResult<()> {
+    let mut app = TuiApp::demo();
     let terminal = TerminalSession::enter()?;
     app.run(terminal).await
 }
@@ -183,6 +189,7 @@ pub struct DashboardState {
     pub context_menu: Option<ContextMenuState>,
     pub execution_prompt: Option<ExecutionPrompt>,
     pub resource_data: Option<ResourcePanelData>,
+    pub demo_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,6 +220,7 @@ impl DashboardState {
             context_menu: None,
             execution_prompt: None,
             resource_data: None,
+            demo_mode: false,
         };
         state.rebuild_filtered();
         state
@@ -332,6 +340,250 @@ pub fn execution_plan_if_confirmed(state: &DashboardState) -> AppResult<Option<O
     Ok(Some(plan))
 }
 
+pub fn apply_demo_execution(state: &mut DashboardState) {
+    state.execution_prompt = None;
+    state.status = "demo mode: execution skipped; no Docker API call was made.".to_string();
+}
+
+pub fn demo_dashboard_state() -> DashboardState {
+    let snapshot = DockerSnapshot::from_containers(
+        demo_containers(),
+        vec![
+            "edge_default".into(),
+            "payments_net".into(),
+            "observability".into(),
+            "postgres-dev".into(),
+        ],
+        vec![
+            "edge_cache".into(),
+            "payments_pgdata".into(),
+            "postgres_dev_data".into(),
+            "grafana_data".into(),
+        ],
+        vec![
+            "ghcr.io/example/edge:0.2.1".into(),
+            "ghcr.io/example/payments:2.8.4".into(),
+            "postgres:16".into(),
+            "redis:7".into(),
+            "grafana/grafana:latest".into(),
+        ],
+        &crate::config::AppConfig::default(),
+    );
+    let mut state = DashboardState::from_snapshot(snapshot, SortMode::Severity);
+    state.theme = ThemeName::Cockpit;
+    state.demo_mode = true;
+    state.status = "DEMO mode: mock data only; Docker execution is disabled.".to_string();
+    state.resource_data = Some(demo_resource_data_for_project("edge"));
+    state
+}
+
+fn demo_containers() -> Vec<Container> {
+    vec![
+        demo_container(
+            "edge-web-1",
+            "edge_web_1",
+            "ghcr.io/example/edge:0.2.1",
+            ContainerState::Running,
+            "Up 47 minutes",
+            Some("edge".into()),
+            None,
+            vec!["edge_default"],
+            vec!["edge_cache"],
+            vec!["127.0.0.1:8080->80/tcp"],
+        ),
+        demo_container(
+            "edge-worker-1",
+            "edge_worker_1",
+            "ghcr.io/example/edge:0.2.1",
+            ContainerState::Unhealthy,
+            "Up 6 minutes (unhealthy)",
+            Some("edge".into()),
+            None,
+            vec!["edge_default"],
+            vec![],
+            vec![],
+        ),
+        demo_container(
+            "api-gateway-1",
+            "api_gateway_1",
+            "ghcr.io/example/gateway:1.4.9",
+            ContainerState::Restarting,
+            "Restarting (1) 14 seconds ago",
+            Some("api-gateway".into()),
+            None,
+            vec!["edge_default", "payments_net"],
+            vec![],
+            vec!["0.0.0.0:8443->443/tcp"],
+        ),
+        demo_container(
+            "payments-api-1",
+            "payments_api_1",
+            "ghcr.io/example/payments:2.8.4",
+            ContainerState::Running,
+            "Up 3 hours",
+            Some("payments".into()),
+            None,
+            vec!["payments_net"],
+            vec![],
+            vec!["127.0.0.1:9000->9000/tcp"],
+        ),
+        demo_container(
+            "postgres-dev",
+            "postgres-dev",
+            "postgres:16",
+            ContainerState::Paused,
+            "Up 2 days (Paused)",
+            None,
+            None,
+            vec!["postgres-dev"],
+            vec!["postgres_dev_data"],
+            vec!["127.0.0.1:5432->5432/tcp"],
+        ),
+        demo_container(
+            "observability-grafana-1",
+            "observability_grafana_1",
+            "grafana/grafana:latest",
+            ContainerState::Running,
+            "Up 26 hours",
+            None,
+            Some("observability".into()),
+            vec!["observability"],
+            vec!["grafana_data"],
+            vec!["127.0.0.1:3000->3000/tcp"],
+        ),
+        demo_container(
+            "redis-cache",
+            "redis-cache",
+            "redis:7",
+            ContainerState::Exited,
+            "Exited (0) 4 hours ago",
+            None,
+            None,
+            vec!["edge_default"],
+            vec!["edge_cache"],
+            vec![],
+        ),
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn demo_container(
+    id: &str,
+    name: &str,
+    image: &str,
+    state: ContainerState,
+    status: &str,
+    compose_project: Option<String>,
+    stack_namespace: Option<String>,
+    networks: Vec<&str>,
+    volumes: Vec<&str>,
+    ports: Vec<&str>,
+) -> Container {
+    let mut labels = BTreeMap::new();
+    if let Some(project) = compose_project.as_ref() {
+        labels.insert("com.docker.compose.project".into(), project.clone());
+    }
+    if let Some(stack) = stack_namespace.as_ref() {
+        labels.insert("com.docker.stack.namespace".into(), stack.clone());
+    }
+    Container {
+        id: id.into(),
+        name: name.into(),
+        image: image.into(),
+        state,
+        status: status.into(),
+        compose_project,
+        stack_namespace,
+        labels,
+        networks: networks.into_iter().map(str::to_string).collect(),
+        volumes: volumes.into_iter().map(str::to_string).collect(),
+        ports: ports.into_iter().map(str::to_string).collect(),
+    }
+}
+
+fn demo_resource_data_for_project(project: &str) -> ResourcePanelData {
+    let sampled_at_ms = crate::audit::now_unix_millis();
+    let rows = match project {
+        "edge" => vec![
+            ResourceRow::ok(
+                "edge-web-1",
+                "edge_web_1",
+                "UP",
+                12.5,
+                512 * 1024 * 1024,
+                2 * 1024 * 1024 * 1024,
+                4_400_000,
+                1_900_000,
+                171_400_000,
+                616_000,
+            ),
+            ResourceRow::ok(
+                "edge-worker-1",
+                "edge_worker_1",
+                "UNHL",
+                86.4,
+                1790 * 1024 * 1024,
+                2 * 1024 * 1024 * 1024,
+                2_800_000,
+                1_100_000,
+                94_000_000,
+                44_000_000,
+            ),
+            ResourceRow::error(
+                "edge-sidecar",
+                "edge_sidecar_1",
+                "ERR",
+                "mock stats timeout",
+            ),
+        ],
+        "api-gateway" => vec![ResourceRow::ok(
+            "api-gateway-1",
+            "api_gateway_1",
+            "RSTR",
+            64.7,
+            740 * 1024 * 1024,
+            1024 * 1024 * 1024,
+            6_200_000,
+            5_100_000,
+            21_000_000,
+            9_000_000,
+        )],
+        "payments" => vec![ResourceRow::ok(
+            "payments-api-1",
+            "payments_api_1",
+            "UP",
+            18.2,
+            384 * 1024 * 1024,
+            1536 * 1024 * 1024,
+            1_400_000,
+            980_000,
+            49_000_000,
+            7_500_000,
+        )],
+        "observability" => vec![ResourceRow::ok(
+            "observability-grafana-1",
+            "observability_grafana_1",
+            "UP",
+            7.9,
+            690 * 1024 * 1024,
+            2 * 1024 * 1024 * 1024,
+            900_000,
+            1_200_000,
+            18_000_000,
+            12_000_000,
+        )],
+        "postgres-dev" => vec![ResourceRow::error(
+            "postgres-dev",
+            "postgres-dev",
+            "PAUS",
+            "mock stats paused: container is paused",
+        )],
+        "redis-cache" => Vec::new(),
+        _ => Vec::new(),
+    };
+    ResourcePanelData::sampled(project, sampled_at_ms, rows).with_stale(true)
+}
+
 pub fn mark_resource_refresh_pending(
     current: Option<ResourcePanelData>,
     project: &str,
@@ -420,7 +672,7 @@ pub fn apply_mouse_action(state: &mut DashboardState, action: MouseAction) {
 }
 
 struct TuiApp {
-    client: DockerClient,
+    client: Option<DockerClient>,
     snapshot: DockerSnapshot,
     filtered: Vec<Project>,
     selected: BTreeSet<String>,
@@ -438,6 +690,7 @@ struct TuiApp {
     resource_refresh_interval: Duration,
     last_refresh: Instant,
     last_resource_refresh: Option<Instant>,
+    demo_mode: bool,
 }
 
 impl TuiApp {
@@ -446,7 +699,7 @@ impl TuiApp {
         let resource_refresh_interval = Duration::from_millis(client.config().tui.refresh_ms.max(250));
         let snapshot = client.snapshot().await?;
         let mut app = Self {
-            client,
+            client: Some(client),
             snapshot,
             filtered: Vec::new(),
             selected: BTreeSet::new(),
@@ -464,9 +717,37 @@ impl TuiApp {
             resource_refresh_interval,
             last_refresh: Instant::now(),
             last_resource_refresh: None,
+            demo_mode: false,
         };
         app.rebuild_filtered();
         Ok(app)
+    }
+
+    fn demo() -> Self {
+        let mut state = demo_dashboard_state();
+        let mut app = Self {
+            client: None,
+            snapshot: state.snapshot,
+            filtered: Vec::new(),
+            selected: BTreeSet::new(),
+            list_state: ListState::default(),
+            filter: String::new(),
+            running_only: false,
+            sort_mode: SortMode::Severity,
+            theme: ThemeName::Cockpit,
+            panel: TuiPanel::Detail,
+            status: "DEMO mode: mock data only; Docker execution is disabled.".to_string(),
+            context_menu: None,
+            execution_prompt: None,
+            resource_data: state.resource_data.take(),
+            resource_task: None,
+            resource_refresh_interval: Duration::from_millis(2_000),
+            last_refresh: Instant::now(),
+            last_resource_refresh: Some(Instant::now()),
+            demo_mode: true,
+        };
+        app.rebuild_filtered();
+        app
     }
 
     async fn run(&mut self, mut session: TerminalSession) -> AppResult<()> {
@@ -523,6 +804,7 @@ impl TuiApp {
             context_menu: self.context_menu.clone(),
             execution_prompt: self.execution_prompt.clone(),
             resource_data: self.resource_data.clone(),
+            demo_mode: self.demo_mode,
         };
         state.table_state.select(self.list_state.selected());
         apply_mouse_action(&mut state, action);
@@ -715,7 +997,19 @@ impl TuiApp {
         };
         let action = plan.action;
         self.status = format!("正在执行 {} ...", operation_label(action));
-        let result = self.client.execute_plan(&plan, false).await?;
+        if self.demo_mode {
+            let mut state = self.dashboard_state();
+            apply_demo_execution(&mut state);
+            self.execution_prompt = state.execution_prompt;
+            self.status = state.status;
+            return Ok(());
+        }
+        let Some(client) = self.client.as_ref() else {
+            self.execution_prompt = None;
+            self.status = "Docker client is not available in this TUI session.".to_string();
+            return Ok(());
+        };
+        let result = client.execute_plan(&plan, false).await?;
         self.execution_prompt = None;
         self.status = format!(
             "{} 执行完成: 成功 {} 个，失败 {} 个。",
@@ -728,7 +1022,25 @@ impl TuiApp {
     }
 
     async fn refresh(&mut self) -> AppResult<()> {
-        self.snapshot = self.client.snapshot().await?;
+        if self.demo_mode {
+            self.last_refresh = Instant::now();
+            self.rebuild_filtered();
+            if self.panel == TuiPanel::Resources {
+                self.resource_data = Some(demo_resource_data_for_project(
+                    self.current_project()
+                        .map(|project| project.name.as_str())
+                        .unwrap_or("demo"),
+                ));
+                self.last_resource_refresh = Some(Instant::now());
+            }
+            self.status = "DEMO mode: mock data refreshed; no Docker API call was made.".to_string();
+            return Ok(());
+        }
+        let Some(client) = self.client.as_ref() else {
+            self.status = "Docker client is not available in this TUI session.".to_string();
+            return Ok(());
+        };
+        self.snapshot = client.snapshot().await?;
         self.last_refresh = Instant::now();
         self.rebuild_filtered();
         if self.panel == TuiPanel::Resources {
@@ -825,6 +1137,7 @@ impl TuiApp {
             context_menu: self.context_menu.clone(),
             execution_prompt: self.execution_prompt.clone(),
             resource_data: self.resource_data.clone(),
+            demo_mode: self.demo_mode,
         };
         state.table_state.select(self.list_state.selected());
         state
@@ -893,7 +1206,27 @@ impl TuiApp {
         self.resource_data =
             mark_resource_refresh_pending(self.resource_data.take(), &current_project);
 
-        let client = self.client.clone();
+        if self.demo_mode {
+            self.resource_data = Some(demo_resource_data_for_project(&current_project));
+            self.last_resource_refresh = Some(Instant::now());
+            return true;
+        }
+
+        let Some(client) = self.client.clone() else {
+            self.resource_data = Some(ResourcePanelData::sampled(
+                current_project,
+                crate::audit::now_unix_millis(),
+                vec![ResourceRow::error(
+                    "client",
+                    "resource sampler",
+                    "ERR",
+                    "Docker client is not available",
+                )],
+            ));
+            self.last_resource_refresh = Some(Instant::now());
+            return true;
+        };
+
         self.resource_task = Some(tokio::spawn(async move {
             client.project_resources_once(&project).await
         }));
@@ -982,30 +1315,47 @@ fn render_header(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state:
     } else {
         &state.filter
     };
+    let demo_badge = if state.demo_mode {
+        Span::styled(
+            " DEMO mock data ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(palette.warning)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(" LIVE docker socket ", Style::default().fg(palette.muted))
+    };
     let title = Line::from(vec![
         Span::styled(
-            " DOCKERCTL COMMAND CENTER ",
+            " OPS COCKPIT ",
             Style::default()
                 .fg(palette.primary)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            " project-first docker ops ",
-            Style::default().fg(palette.muted),
+            " DOCKERCTL COMMAND CENTER",
+            Style::default()
+                .fg(palette.primary)
+                .add_modifier(Modifier::BOLD),
         ),
+        Span::styled(" | ", Style::default().fg(palette.muted)),
+        demo_badge,
         Span::styled(
             format!(
-                " mode:{} sort:{:?} filter:{} ",
+                " mode:{} selected:{} sort:{:?} filter:{} ",
                 if state.running_only { "active" } else { "all" },
+                state.selected.len(),
                 state.sort_mode,
                 filter
             ),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(palette.warning),
         ),
     ]);
     frame.render_widget(
         Paragraph::new(title)
             .alignment(Alignment::Center)
+            .style(Style::default().bg(palette.surface))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -1019,28 +1369,63 @@ fn render_header(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state:
 #[derive(Debug, Clone, Copy)]
 struct ThemePalette {
     primary: Color,
+    accent: Color,
+    danger: Color,
+    warning: Color,
+    success: Color,
     muted: Color,
+    surface: Color,
+    selection: Color,
 }
 
 fn theme_palette(theme: ThemeName) -> ThemePalette {
     match theme {
+        ThemeName::Cockpit => ThemePalette {
+            primary: Color::Rgb(56, 189, 248),
+            accent: Color::Rgb(20, 184, 166),
+            danger: Color::Rgb(248, 113, 113),
+            warning: Color::Rgb(251, 191, 36),
+            success: Color::Rgb(74, 222, 128),
+            muted: Color::Rgb(100, 116, 139),
+            surface: Color::Rgb(15, 23, 42),
+            selection: Color::Rgb(30, 41, 59),
+        },
         ThemeName::Industrial => ThemePalette {
             primary: Color::Cyan,
+            accent: Color::Blue,
+            danger: Color::Red,
+            warning: Color::Yellow,
+            success: Color::Green,
             muted: Color::DarkGray,
+            surface: Color::Black,
+            selection: Color::Rgb(43, 36, 11),
         },
         ThemeName::Signal => ThemePalette {
             primary: Color::Green,
+            accent: Color::Cyan,
+            danger: Color::Red,
+            warning: Color::Yellow,
+            success: Color::Green,
             muted: Color::DarkGray,
+            surface: Color::Black,
+            selection: Color::Rgb(18, 45, 22),
         },
         ThemeName::Ocean => ThemePalette {
             primary: Color::Blue,
+            accent: Color::Cyan,
+            danger: Color::Red,
+            warning: Color::Yellow,
+            success: Color::Green,
             muted: Color::DarkGray,
+            surface: Color::Black,
+            selection: Color::Rgb(18, 31, 52),
         },
     }
 }
 
 fn render_metric_bar(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &DashboardState) {
-    let metrics = dashboard_metrics(state);
+    let palette = theme_palette(state.theme);
+    let metrics = dashboard_metrics(state, palette);
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -1052,22 +1437,48 @@ fn render_metric_bar(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, st
         ])
         .split(area);
 
-    for (index, (label, value, color)) in metrics.into_iter().enumerate() {
-        let text = Line::from(vec![
-            Span::styled(value, Style::default().fg(color).add_modifier(Modifier::BOLD)),
-            Span::raw(" "),
-            Span::styled(label, Style::default().fg(Color::DarkGray)),
-        ]);
+    for (index, metric) in metrics.into_iter().enumerate() {
+        let text = vec![
+            Line::from(vec![
+                Span::styled(
+                    "KPI ",
+                    Style::default()
+                        .fg(palette.muted)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(metric.label, Style::default().fg(palette.muted)),
+            ]),
+            Line::from(Span::styled(
+                metric.value,
+                Style::default()
+                    .fg(metric.color)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(metric.hint, Style::default().fg(palette.muted))),
+        ];
         frame.render_widget(
-            Paragraph::new(text).alignment(Alignment::Center).block(
+            Paragraph::new(text).alignment(Alignment::Center).style(
+                Style::default()
+                    .fg(metric.color)
+                    .bg(palette.surface),
+            ).block(
                 Block::default()
+                    .title(metric.label)
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(color)),
+                    .border_style(Style::default().fg(metric.color)),
             ),
             chunks[index],
         );
     }
+}
+
+#[derive(Debug, Clone)]
+struct MetricTile {
+    label: &'static str,
+    value: String,
+    hint: &'static str,
+    color: Color,
 }
 
 fn render_projects_table(
@@ -1075,52 +1486,65 @@ fn render_projects_table(
     area: ratatui::layout::Rect,
     state: &mut DashboardState,
 ) {
+    let palette = theme_palette(state.theme);
     let header = Row::new(vec![
-        Cell::from(""),
+        Cell::from("Sel"),
         Cell::from("State"),
         Cell::from("Project"),
         Cell::from("Kind"),
         Cell::from("Run"),
+        Cell::from("Ports"),
         Cell::from("Risk"),
     ])
-    .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD));
+    .style(
+        Style::default()
+            .fg(palette.muted)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let rows = state.filtered.iter().map(|project| {
         let is_selected = state.selected.contains(&project.name);
         let selected = if is_selected { "[x]" } else { "[ ]" };
-        let risk = project_risk(project);
-        let marker_style = if is_selected {
-            selected_project_style()
+        let risk = project_risk(project, palette);
+        let selection_style = selected_project_style(palette);
+        let row_style = if is_selected {
+            Style::default().bg(palette.selection)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().bg(palette.surface)
         };
-        let project_name_style = if is_selected {
-            selected_project_style()
-        } else {
-            Style::default().fg(Color::White)
-        };
-        let row = Row::new(vec![
-            Cell::from(selected).style(marker_style),
-            Cell::from(project.state_code()).style(project_style(project)),
-            Cell::from(project.name.clone()).style(project_name_style),
-            Cell::from(format!("{:?}", project.kind)).style(Style::default().fg(Color::DarkGray)),
-            Cell::from(format!("{}/{}", project.active(), project.containers.len())),
-            Cell::from(risk.0).style(Style::default().fg(risk.1).add_modifier(Modifier::BOLD)),
-        ]);
-        if is_selected {
-            row.style(Style::default().bg(Color::Rgb(43, 36, 11)))
-        } else {
-            row
-        }
+        Row::new(vec![
+            Cell::from(selected).style(if is_selected {
+                selection_style
+            } else {
+                Style::default().fg(palette.muted)
+            }),
+            Cell::from(status_pill(project)).style(project_style(project, palette)),
+            Cell::from(project.name.clone()).style(if is_selected {
+                selection_style
+            } else {
+                Style::default().fg(Color::White)
+            }),
+            Cell::from(project_kind_label(project)).style(Style::default().fg(palette.muted)),
+            Cell::from(format!("{}/{}", project.active(), project.containers.len()))
+                .style(Style::default().fg(palette.accent)),
+            Cell::from(project.ports.len().to_string()).style(Style::default().fg(palette.muted)),
+            Cell::from(risk.0).style(
+                Style::default()
+                    .fg(risk.1)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+        .style(row_style)
     });
 
     let table = Table::new(
         rows,
         [
-            Constraint::Length(4),
-            Constraint::Length(6),
+            Constraint::Length(5),
+            Constraint::Length(7),
             Constraint::Min(14),
             Constraint::Length(10),
+            Constraint::Length(7),
             Constraint::Length(7),
             Constraint::Length(8),
         ],
@@ -1128,19 +1552,33 @@ fn render_projects_table(
     .header(header)
     .block(
         Block::default()
-            .title("Projects")
+            .title("Projects / Risk Radar")
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Blue)),
+            .border_style(Style::default().fg(palette.primary))
+            .style(Style::default().bg(palette.surface)),
     )
     .row_highlight_style(
         Style::default()
-            .fg(Color::Cyan)
+            .fg(palette.primary)
+            .bg(palette.selection)
             .add_modifier(Modifier::BOLD),
     )
     .highlight_symbol(">> ");
 
     frame.render_stateful_widget(table, area, &mut state.table_state);
+}
+
+fn status_pill(project: &Project) -> String {
+    format!("[{}]", project.state_code())
+}
+
+fn project_kind_label(project: &Project) -> &'static str {
+    match project.kind {
+        crate::domain::ProjectKind::Compose => "compose",
+        crate::domain::ProjectKind::Stack => "stack",
+        crate::domain::ProjectKind::Standalone => "single",
+    }
 }
 
 fn render_ops_deck(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &DashboardState) {
@@ -1149,6 +1587,7 @@ fn render_ops_deck(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, stat
         return;
     }
 
+    let palette = theme_palette(state.theme);
     let title = match state.panel {
         TuiPanel::Detail => "Ops Deck / Detail",
         TuiPanel::Doctor => "Ops Deck / Doctor",
@@ -1163,18 +1602,51 @@ fn render_ops_deck(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, stat
         TuiPanel::Plan(OperationAction::Rescue) => "Ops Deck / Plan Rescue",
         TuiPanel::Help => "Ops Deck / Help",
     };
+    let current = state
+        .current_project()
+        .map(|project| {
+            format!(
+                "target:{} state:{} active:{} ports:{}",
+                project.name,
+                project.state_code(),
+                project.active(),
+                project.ports.len()
+            )
+        })
+        .unwrap_or_else(|| "target:none".to_string());
+    let mut content = vec![
+        Line::from(vec![
+            Span::styled(
+                "CONTROL SURFACE",
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" | {current}"), Style::default().fg(palette.muted)),
+        ]),
+        Line::from(""),
+    ];
+    content.extend(text_lines(panel_text(state)));
     frame.render_widget(
-        Paragraph::new(panel_text(state))
+        Paragraph::new(content)
             .wrap(Wrap { trim: false })
+            .style(Style::default().bg(palette.surface))
             .block(
                 Block::default()
                     .title(title)
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::Magenta)),
+                    .border_style(Style::default().fg(palette.accent))
+                    .style(Style::default().bg(palette.surface)),
             ),
         area,
     );
+}
+
+fn text_lines(text: String) -> Vec<Line<'static>> {
+    text.lines()
+        .map(|line| Line::from(line.to_string()))
+        .collect()
 }
 
 fn render_resources_panel(
@@ -1182,11 +1654,13 @@ fn render_resources_panel(
     area: ratatui::layout::Rect,
     state: &DashboardState,
 ) {
+    let palette = theme_palette(state.theme);
     let block = Block::default()
-        .title("Ops Deck / Resources")
+        .title("Ops Deck / Resources / Resource Monitor")
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Magenta));
+        .border_style(Style::default().fg(palette.accent))
+        .style(Style::default().bg(palette.surface));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1213,12 +1687,14 @@ fn render_resource_summary(
         .current_project()
         .map(|project| project.name.as_str())
         .unwrap_or("none");
+    let palette = theme_palette(state.theme);
 
     let block = Block::default()
-        .title("Summary")
+        .title("KPI Strip / Project Resources")
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(palette.primary))
+        .style(Style::default().bg(palette.surface));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1227,7 +1703,7 @@ fn render_resource_summary(
         .constraints([Constraint::Length(2), Constraint::Min(3)])
         .split(inner);
 
-    let status = resource_status_line(state, project_name);
+    let status = resource_status_lines(state, project_name);
     frame.render_widget(Paragraph::new(status), chunks[0]);
 
     let cards = Layout::default()
@@ -1241,10 +1717,10 @@ fn render_resource_summary(
         .split(chunks[1]);
 
     let Some(data) = state.resource_data.as_ref().filter(|data| !data.loading) else {
-        render_resource_card(frame, cards[0], "CPU", "--", "waiting", Color::DarkGray);
-        render_resource_card(frame, cards[1], "MEM", "--", "waiting", Color::DarkGray);
-        render_resource_card(frame, cards[2], "NET", "--", "rx / tx", Color::DarkGray);
-        render_resource_card(frame, cards[3], "IO", "--", "read / write", Color::DarkGray);
+        render_resource_card(frame, cards[0], "CPU", "--", "waiting", palette.muted, palette);
+        render_resource_card(frame, cards[1], "MEM", "--", "waiting", palette.muted, palette);
+        render_resource_card(frame, cards[2], "NET", "--", "rx / tx", palette.muted, palette);
+        render_resource_card(frame, cards[3], "IO", "--", "read / write", palette.muted, palette);
         return;
     };
 
@@ -1255,6 +1731,7 @@ fn render_resource_summary(
         &format!("{:.1}%", data.summary.cpu_percent),
         &format!("{} containers", data.summary.containers),
         resource_cpu_color(data.summary.cpu_percent),
+        palette,
     );
     render_resource_card(
         frame,
@@ -1267,6 +1744,7 @@ fn render_resource_summary(
             format_compact_bytes(data.summary.memory_limit_bytes)
         ),
         resource_memory_color(data.summary.memory_percent),
+        palette,
     );
     render_resource_card(
         frame,
@@ -1278,7 +1756,8 @@ fn render_resource_summary(
             format_compact_bytes(data.summary.network_tx_bytes)
         ),
         "rx / tx",
-        Color::Cyan,
+        palette.primary,
+        palette,
     );
     render_resource_card(
         frame,
@@ -1291,60 +1770,65 @@ fn render_resource_summary(
         ),
         "read / write",
         if data.summary.error_count > 0 {
-            Color::Yellow
+            palette.warning
         } else {
-            Color::Green
+            palette.success
         },
+        palette,
     );
 }
 
-fn resource_status_line(state: &DashboardState, project_name: &str) -> Line<'static> {
+fn resource_status_lines(state: &DashboardState, project_name: &str) -> Vec<Line<'static>> {
+    let palette = theme_palette(state.theme);
     match state.resource_data.as_ref() {
-        Some(data) if data.loading => Line::from(vec![
+        Some(data) if data.loading => vec![Line::from(vec![
             Span::styled(
                 "Resource Monitor",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(palette.primary)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(" | project {project_name} | ")),
-            Span::styled("sampling...", Style::default().fg(Color::Yellow)),
-        ]),
+            Span::styled("sampling...", Style::default().fg(palette.warning)),
+            Span::styled(" | KPI loading", Style::default().fg(palette.muted)),
+        ])],
         Some(data) => {
-            let state = if data.stale {
-                Span::styled("refreshing", Style::default().fg(Color::Yellow))
+            let sample_state = if data.stale {
+                Span::styled("refreshing", Style::default().fg(palette.warning))
             } else {
-                Span::styled("live", Style::default().fg(Color::Green))
+                Span::styled("live", Style::default().fg(palette.success))
             };
-            let mut spans = vec![
+            let spans = vec![
                 Span::styled(
                     "Resource Monitor",
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(palette.primary)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(format!(" | {} | ", data.project)),
-                state,
+                sample_state,
+                Span::styled(" | KPI sampled", Style::default().fg(palette.muted)),
                 Span::raw(format!(" | err {}", data.summary.error_count)),
             ];
+            let mut lines = vec![Line::from(spans)];
             if let Some(error) = data.rows.iter().find_map(|row| row.error.as_deref()) {
-                spans.push(Span::styled(
-                    format!(" | {}", truncate_text(error, 24)),
-                    Style::default().fg(Color::Red),
-                ));
+                lines.push(Line::from(vec![
+                    Span::styled("stats error | ", Style::default().fg(palette.danger)),
+                    Span::styled(error.to_string(), Style::default().fg(palette.danger)),
+                ]));
             }
-            Line::from(spans)
+            lines
         }
-        None => Line::from(vec![
+        None => vec![Line::from(vec![
             Span::styled(
                 "Resource Monitor",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(palette.primary)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(" | project {project_name} | ")),
-            Span::styled("waiting", Style::default().fg(Color::DarkGray)),
-        ]),
+            Span::styled("waiting", Style::default().fg(palette.muted)),
+        ])],
     }
 }
 
@@ -1355,21 +1839,35 @@ fn render_resource_card(
     value: &str,
     subtitle: &str,
     color: Color,
+    palette: ThemePalette,
 ) {
     let lines = vec![
+        Line::from(Span::styled(
+            format!("KPI {title}"),
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::BOLD),
+        )),
         Line::from(Span::styled(
             value.to_string(),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         )),
-        Line::from(Span::styled(subtitle.to_string(), Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled(
+            subtitle.to_string(),
+            Style::default().fg(palette.muted),
+        )),
     ];
     frame.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Center).block(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .style(Style::default().bg(palette.surface))
+            .block(
             Block::default()
                 .title(title)
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(color)),
+                .border_style(Style::default().fg(color))
+                .style(Style::default().bg(palette.surface)),
         ),
         area,
     );
@@ -1380,14 +1878,18 @@ fn render_resource_table(
     area: ratatui::layout::Rect,
     state: &DashboardState,
 ) {
+    let palette = theme_palette(state.theme);
     let Some(data) = state.resource_data.as_ref().filter(|data| !data.loading) else {
         frame.render_widget(
-            Paragraph::new("sampling...\nNo resource rows yet.").block(
+            Paragraph::new("sampling...\nNo resource rows yet.")
+                .style(Style::default().bg(palette.surface))
+                .block(
                 Block::default()
-                    .title("Containers")
+                    .title("Containers / Resource Rows")
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::Blue)),
+                    .border_style(Style::default().fg(palette.primary))
+                    .style(Style::default().bg(palette.surface)),
             ),
             area,
         );
@@ -1396,19 +1898,22 @@ fn render_resource_table(
 
     if data.rows.is_empty() {
         frame.render_widget(
-            Paragraph::new("No active containers in current project.").block(
+            Paragraph::new("No active containers in current project.")
+                .style(Style::default().fg(palette.muted).bg(palette.surface))
+                .block(
                 Block::default()
-                    .title("Containers")
+                    .title("Containers / Resource Rows")
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::Blue)),
+                    .border_style(Style::default().fg(palette.primary))
+                    .style(Style::default().bg(palette.surface)),
             ),
             area,
         );
         return;
     }
 
-    let rows = data.rows.iter().map(resource_table_row);
+    let rows = data.rows.iter().map(|row| resource_table_row(row, palette));
     let table = Table::new(
         rows,
         [
@@ -1429,28 +1934,34 @@ fn render_resource_table(
             Cell::from("NET rx/tx"),
             Cell::from("IO r/w"),
         ])
-        .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+        .style(
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::BOLD),
+        ),
     )
     .block(
         Block::default()
-            .title("Containers")
+            .title("Containers / Resource Rows")
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Blue)),
+            .border_style(Style::default().fg(palette.primary))
+            .style(Style::default().bg(palette.surface)),
     );
     frame.render_widget(table, area);
 }
 
-fn resource_table_row(row: &ResourceRow) -> Row<'_> {
+fn resource_table_row(row: &ResourceRow, palette: ThemePalette) -> Row<'_> {
     if let Some(error) = row.error.as_deref() {
         return Row::new(vec![
-            Cell::from(row.state.clone()).style(Style::default().fg(Color::Red)),
-            Cell::from(row.container_name.clone()).style(Style::default().fg(Color::Red)),
-            Cell::from("ERR").style(Style::default().fg(Color::Red)),
-            Cell::from("stats").style(Style::default().fg(Color::Red)),
-            Cell::from(truncate_text(error, 14)).style(Style::default().fg(Color::Red)),
+            Cell::from(row.state.clone()).style(Style::default().fg(palette.danger)),
+            Cell::from(row.container_name.clone()).style(Style::default().fg(palette.danger)),
+            Cell::from("ERR").style(Style::default().fg(palette.danger)),
+            Cell::from("stats").style(Style::default().fg(palette.danger)),
+            Cell::from(error.to_string()).style(Style::default().fg(palette.danger)),
             Cell::from(""),
-        ]);
+        ])
+        .style(Style::default().bg(palette.surface));
     }
     Row::new(vec![
         Cell::from(row.state.clone()),
@@ -1469,6 +1980,7 @@ fn resource_table_row(row: &ResourceRow) -> Row<'_> {
             format_compact_bytes(row.block_write_bytes)
         )),
     ])
+    .style(Style::default().bg(palette.surface))
 }
 
 fn render_resource_footer(
@@ -1476,6 +1988,7 @@ fn render_resource_footer(
     area: ratatui::layout::Rect,
     state: &DashboardState,
 ) {
+    let palette = theme_palette(state.theme);
     let target = state
         .current_project()
         .and_then(|project| project.containers.first())
@@ -1488,10 +2001,11 @@ fn render_resource_footer(
         .alignment(Alignment::Center)
         .block(
             Block::default()
-                .title("Commands")
+                .title("Commands / Resource Monitor")
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(Style::default().fg(palette.muted))
+                .style(Style::default().bg(palette.surface)),
         ),
         area,
     );
@@ -1529,23 +2043,12 @@ fn format_compact_bytes(bytes: u64) -> String {
     format_bytes(bytes).replace(' ', "")
 }
 
-fn truncate_text(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-    if max_chars <= 3 {
-        return ".".repeat(max_chars);
-    }
-    let mut value = text.chars().take(max_chars - 3).collect::<String>();
-    value.push_str("...");
-    value
-}
-
 fn render_command_bar(
     frame: &mut ratatui::Frame,
     area: ratatui::layout::Rect,
     state: &DashboardState,
 ) {
+    let palette = theme_palette(state.theme);
     let text = if state.status.is_empty() {
         " mouse: click row select, right-click manage, wheel move | keys: j/k move | space select | / filter | i detail | d doctor | l logs | m resources | 1-5 plan | Enter execute | q quit "
             .to_string()
@@ -1555,12 +2058,14 @@ fn render_command_bar(
     frame.render_widget(
         Paragraph::new(text)
             .alignment(Alignment::Center)
+            .style(Style::default().fg(palette.primary).bg(palette.surface))
             .block(
                 Block::default()
-                    .title("Command Bar")
+                    .title("Command Bar / Fast Ops")
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::DarkGray)),
+                    .border_style(Style::default().fg(palette.muted))
+                    .style(Style::default().bg(palette.surface)),
             ),
         area,
     );
@@ -1574,6 +2079,7 @@ fn render_context_menu(
     let Some(menu) = state.context_menu.as_ref() else {
         return;
     };
+    let palette = theme_palette(state.theme);
     let rect = context_menu_rect(area, menu);
     let title = if state.selected.len() > 1 && state.selected.contains(&menu.project) {
         format!("Manage {} selected", state.selected.len())
@@ -1588,11 +2094,11 @@ fn render_context_menu(
             Line::from(vec![
                 Span::styled(
                     format!(" {:<8}", item.label()),
-                    context_menu_item_style(*item, selected),
+                    context_menu_item_style(*item, selected, palette),
                 ),
                 Span::styled(
                     item.description(),
-                    context_menu_description_style(selected),
+                    context_menu_description_style(selected, palette),
                 ),
             ])
         })
@@ -1605,7 +2111,8 @@ fn render_context_menu(
                 .title(title)
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::Cyan)),
+                .border_style(Style::default().fg(palette.primary))
+                .style(Style::default().bg(palette.surface)),
         ),
         rect,
     );
@@ -1728,35 +2235,35 @@ fn context_menu_item_at(
     CONTEXT_MENU_ITEMS.get(item_index).copied()
 }
 
-fn context_menu_item_style(item: ContextMenuItem, selected: bool) -> Style {
+fn context_menu_item_style(item: ContextMenuItem, selected: bool, palette: ThemePalette) -> Style {
     if selected {
         return Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
+            .fg(Color::White)
+            .bg(palette.primary)
             .add_modifier(Modifier::BOLD);
     }
     match item {
         ContextMenuItem::Remove => Style::default()
-            .fg(Color::Yellow)
+            .fg(palette.warning)
             .add_modifier(Modifier::BOLD),
         ContextMenuItem::Purge => Style::default()
-            .fg(Color::Red)
+            .fg(palette.danger)
             .add_modifier(Modifier::BOLD),
         ContextMenuItem::Rescue => Style::default()
-            .fg(Color::Cyan)
+            .fg(palette.accent)
             .add_modifier(Modifier::BOLD),
         _ => Style::default().fg(Color::White),
     }
 }
 
-fn context_menu_description_style(selected: bool) -> Style {
+fn context_menu_description_style(selected: bool, palette: ThemePalette) -> Style {
     if selected {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
+            .fg(Color::White)
+            .bg(palette.primary)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(palette.muted)
     }
 }
 
@@ -1774,7 +2281,7 @@ fn context_menu_selected_item(menu: &ContextMenuState) -> ContextMenuItem {
         .unwrap_or(ContextMenuItem::Inspect)
 }
 
-fn dashboard_metrics(state: &DashboardState) -> Vec<(&'static str, String, Color)> {
+fn dashboard_metrics(state: &DashboardState, palette: ThemePalette) -> Vec<MetricTile> {
     let total = state.snapshot.projects.len();
     let active = state
         .snapshot
@@ -1789,21 +2296,46 @@ fn dashboard_metrics(state: &DashboardState) -> Vec<(&'static str, String, Color
         .filter(|project| project.unhealthy > 0 || project.restarting > 0)
         .count();
     let selected = state.selected.len();
-    let risk_color = if unhealthy > 0 { Color::Red } else { Color::Green };
+    let risk_color = if unhealthy > 0 {
+        palette.danger
+    } else {
+        palette.success
+    };
     vec![
-        ("Projects", total.to_string(), Color::Cyan),
-        ("Active", active.to_string(), Color::Green),
-        ("Risk", unhealthy.to_string(), risk_color),
-        ("Selected", selected.to_string(), Color::Yellow),
-        (
-            "Visible",
-            state.filtered.len().to_string(),
-            if state.running_only {
-                Color::Blue
+        MetricTile {
+            label: "Projects",
+            value: total.to_string(),
+            hint: "fleet size",
+            color: palette.primary,
+        },
+        MetricTile {
+            label: "Active",
+            value: active.to_string(),
+            hint: "running set",
+            color: palette.success,
+        },
+        MetricTile {
+            label: "Risk",
+            value: unhealthy.to_string(),
+            hint: "needs review",
+            color: risk_color,
+        },
+        MetricTile {
+            label: "Selected",
+            value: selected.to_string(),
+            hint: "operation scope",
+            color: palette.warning,
+        },
+        MetricTile {
+            label: "Visible",
+            value: state.filtered.len().to_string(),
+            hint: if state.running_only { "active filter" } else { "all projects" },
+            color: if state.running_only {
+                palette.accent
             } else {
-                Color::DarkGray
+                palette.muted
             },
-        ),
+        },
     ]
 }
 
@@ -1932,7 +2464,7 @@ fn resources_text(state: &DashboardState) -> String {
          commands\n\
          dockerctl stats {target}\n\
          dockerctl stats {target} --json\n\n\
-         note: v0.2.0 keeps this panel lightweight; live streaming remains opt-in through stats/logs commands.\n",
+         note: v0.2.1 samples only the selected project to keep the cockpit responsive.\n",
         project.name,
         project.containers.len(),
         project.active(),
@@ -1943,37 +2475,37 @@ fn resources_text(state: &DashboardState) -> String {
     )
 }
 
-fn project_style(project: &Project) -> Style {
+fn project_style(project: &Project, palette: ThemePalette) -> Style {
     if project.unhealthy > 0 {
-        Style::default().fg(Color::Red)
+        Style::default().fg(palette.danger)
     } else if project.restarting > 0 {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(palette.warning)
     } else if project.paused > 0 {
-        Style::default().fg(Color::Blue)
+        Style::default().fg(palette.accent)
     } else if project.active() > 0 {
-        Style::default().fg(Color::Green)
+        Style::default().fg(palette.success)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(palette.muted)
     }
 }
 
-fn selected_project_style() -> Style {
+fn selected_project_style(palette: ThemePalette) -> Style {
     Style::default()
-        .fg(Color::Yellow)
+        .fg(palette.warning)
         .add_modifier(Modifier::BOLD)
 }
 
-fn project_risk(project: &Project) -> (&'static str, Color) {
+fn project_risk(project: &Project, palette: ThemePalette) -> (&'static str, Color) {
     if project.unhealthy > 0 {
-        ("HIGH", Color::Red)
+        ("HIGH", palette.danger)
     } else if project.restarting > 0 {
-        ("LOOP", Color::Yellow)
+        ("LOOP", palette.warning)
     } else if project.paused > 0 {
-        ("PAUSE", Color::Blue)
+        ("PAUSE", palette.accent)
     } else if project.active() > 0 {
-        ("LOW", Color::Green)
+        ("LOW", palette.success)
     } else {
-        ("IDLE", Color::DarkGray)
+        ("IDLE", palette.muted)
     }
 }
 

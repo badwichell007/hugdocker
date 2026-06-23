@@ -39,12 +39,14 @@ cargo build --release
 bash -n scripts/install.sh
 bash -n scripts/install-cli.sh
 bash -n scripts/uninstall-cli.sh
+bash -n scripts/open-menu.sh
 ```
 
 5. 真实 Docker 环境验收
 
 ```bash
 dockerctl
+dockerctl demo
 dockerctl list
 dockerctl running
 dockerctl doctor
@@ -57,8 +59,8 @@ dockerctl stats <container>
 6. 发布 tag
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
 GitHub Actions 会构建 Linux x86_64/aarch64 release 包。

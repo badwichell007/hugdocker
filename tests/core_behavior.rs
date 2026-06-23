@@ -181,6 +181,8 @@ theme = "signal"
     .expect("config");
 
     assert_eq!(parse_theme(&config.tui.theme), ThemeName::Signal);
+    assert_eq!(parse_theme(&AppConfig::default().tui.theme), ThemeName::Cockpit);
+    assert_eq!(parse_theme("cockpit"), ThemeName::Cockpit);
     assert_eq!(parse_theme("unknown"), ThemeName::Industrial);
 }
 

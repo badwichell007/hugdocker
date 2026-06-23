@@ -23,6 +23,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    /// 使用内置 mock 数据体验 TUI，不连接 Docker daemon
+    Demo,
     /// 进入全屏 TUI
     Tui,
     /// 兼容旧版经典菜单，当前等价于 TUI
@@ -212,6 +214,7 @@ pub async fn run() -> AppResult<()> {
     let config = load_config();
 
     match cli.command.unwrap_or(Commands::Tui) {
+        Commands::Demo => tui::run_demo().await,
         Commands::Tui | Commands::Menu => {
             let client = DockerClient::connect(config)?;
             tui::run(client).await

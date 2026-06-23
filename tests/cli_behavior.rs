@@ -8,9 +8,20 @@ fn help_lists_daily_docker_workflow_commands() {
     cmd.arg("--help").assert().success().stdout(
         predicate::str::contains("Linux 日常 Docker 项目管理")
             .and(predicate::str::contains("list"))
+            .and(predicate::str::contains("demo"))
             .and(predicate::str::contains("safe-prune"))
             .and(predicate::str::contains("completion")),
     );
+}
+
+#[test]
+fn demo_help_is_available_without_docker_daemon() {
+    let mut cmd = Command::cargo_bin("dockerctl").expect("binary");
+
+    cmd.args(["demo", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mock").or(predicate::str::contains("Demo")));
 }
 
 #[test]

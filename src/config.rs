@@ -52,7 +52,7 @@ impl Default for TuiConfig {
             refresh_ms: 2_000,
             log_tail: 200,
             default_filter: String::new(),
-            theme: "industrial".to_string(),
+            theme: "cockpit".to_string(),
         }
     }
 }
@@ -60,6 +60,7 @@ impl Default for TuiConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeName {
+    Cockpit,
     Industrial,
     Signal,
     Ocean,
@@ -67,6 +68,7 @@ pub enum ThemeName {
 
 pub fn parse_theme(raw: &str) -> ThemeName {
     match raw.trim().to_ascii_lowercase().as_str() {
+        "cockpit" => ThemeName::Cockpit,
         "signal" => ThemeName::Signal,
         "ocean" => ThemeName::Ocean,
         _ => ThemeName::Industrial,
