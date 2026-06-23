@@ -13,6 +13,8 @@
 [![Docker API](https://img.shields.io/badge/Docker%20API-bollard-2563eb)](https://github.com/fussybeaver/bollard)
 [![License](https://img.shields.io/badge/license-MIT-111827)](LICENSE)
 
+`dockerctl` is not another container list. It is a local ops control plane for project-scoped Docker work.
+
 </div>
 
 ---
@@ -20,6 +22,7 @@
 ## 目录
 
 - [为什么做 dockerctl](#为什么做-dockerctl)
+- [界面预览](#界面预览)
 - [核心能力](#核心能力)
 - [快速安装](#快速安装)
 - [快速开始](#快速开始)
@@ -49,6 +52,35 @@ select project -> inspect risk -> preview operation -> confirm safely -> audit r
 - 当前项目 CPU、内存、网络、IO 是否异常？
 - 出问题时能否一键生成恢复预案，而不是手动拼命令？
 - 批量操作能否先 dry-run，再安全执行，并留下审计记录？
+
+设计原则：
+
+| 原则 | 含义 |
+| --- | --- |
+| Project-first | 日常运维关心的是项目状态，而不是孤立容器行 |
+| Preview-before-mutate | 所有修改动作先生成 Operation Plan，再进入确认和执行 |
+| Read-heavy, mutate-carefully | 查看、诊断、监控要快；删除、purge、prune 必须慢下来确认 |
+| Low idle cost | TUI 空闲时不高频重绘，资源视图不做全局轮询 |
+| Scriptable by default | 人用 TUI，脚本用 JSON；两者复用同一套核心模型 |
+
+## 界面预览
+
+```text
+╭──────────────────────────── DOCKERCTL COMMAND CENTER ────────────────────────────╮
+│ mode:all  sort:Severity  filter:none        project-first docker ops             │
+╰──────────────────────────────────────────────────────────────────────────────────╯
+╭ Projects ─────────────────────────╮ ╭ Ops Deck / Resources ─────────────────────╮
+│ [x] UP    mcphub        compose   │ │ Resource Monitor | mcphub | refreshing    │
+│ [ ] RISK  api-gateway   compose   │ │ ╭ CPU ─────╮ ╭ MEM ─────╮ ╭ NET ─────╮   │
+│ [ ] DOWN  postgres-dev  standalone│ │ │ 12.5%    │ │ 48.1%    │ │ 4.2Mi/1M │   │
+│                                   │ │ ╰──────────╯ ╰──────────╯ ╰──────────╯   │
+│ right-click: manage project       │ │ State Container      CPU   MEM  NET  IO  │
+│ space: select  /: filter          │ │ UP    mcphub        0.0%  2.1% rx/tx r/w │
+╰───────────────────────────────────╯ ╰──────────────────────────────────────────╯
+╭ Command Bar ────────────────────────────────────────────────────────────────────╮
+│ mouse: click row select, right-click manage | m resources | Enter execute        │
+╰──────────────────────────────────────────────────────────────────────────────────╯
+```
 
 ## 核心能力
 
@@ -184,6 +216,19 @@ dockerctl safe-prune --confirm-token PRUNE
 dockerctl timeline --tail 100
 dockerctl timeline --watch
 ```
+
+常用动作面：
+
+| 目标 | 命令 |
+| --- | --- |
+| 进入 TUI | `dockerctl` |
+| 项目清单 | `dockerctl list --json` |
+| 风险诊断 | `dockerctl doctor --json` |
+| 资源采样 | `dockerctl stats <container> --json` |
+| 操作预演 | `dockerctl plan restart myapp --json` |
+| 异常恢复 | `dockerctl rescue myapp --dry-run` |
+| 安全清理 | `dockerctl safe-prune --dry-run` |
+| 事件时间线 | `dockerctl timeline --tail 100` |
 
 ## TUI 使用教程
 
@@ -493,6 +538,28 @@ flowchart LR
     D --> N[Timeline]
 ```
 
+运行时数据流：
+
+```mermaid
+sequenceDiagram
+    participant UI as TUI / CLI
+    participant Snapshot as Snapshot Aggregator
+    participant Docker as Docker Engine API
+    participant Planner as Operation Planner
+    participant Safety as Safety Rail
+    participant Audit as Audit JSONL
+
+    UI->>Snapshot: request project snapshot
+    Snapshot->>Docker: list containers/networks/volumes/images
+    Docker-->>Snapshot: raw docker objects
+    Snapshot-->>UI: grouped Project model
+    UI->>Planner: action + selected projects
+    Planner-->>UI: OperationPlan with impact scope
+    UI->>Safety: confirmation token / second enter
+    Safety->>Docker: execute only after confirmation
+    Safety->>Audit: write OperationResult
+```
+
 核心模块：
 
 | 模块 | 职责 |
@@ -515,6 +582,15 @@ flowchart LR
 - Resource Monitor 只在资源页采样当前项目，不全局轮询。
 - stats 采样通过后台 one-shot task 执行，避免阻塞按键和鼠标。
 - Docker events 摘要写入 timeline，便于后续排障。
+
+质量门禁：
+
+| 检查 | 命令 |
+| --- | --- |
+| 编译检查 | `cargo check --all-targets` |
+| 单元和集成测试 | `cargo test --all-targets` |
+| Release 构建 | `cargo build --release` |
+| 脚本语法 | `bash -n scripts/install.sh scripts/install-cli.sh scripts/uninstall-cli.sh scripts/open-menu.sh` |
 
 ## JSON 输出
 
