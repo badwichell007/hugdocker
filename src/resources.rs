@@ -40,6 +40,16 @@ impl ResourcePanelData {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResourceTrend {
+    pub cpu_delta_percent: f64,
+    pub memory_delta_bytes: i128,
+    pub network_rx_delta_bytes: i128,
+    pub network_tx_delta_bytes: i128,
+    pub block_read_delta_bytes: i128,
+    pub block_write_delta_bytes: i128,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResourceRow {
     pub container_id: String,
@@ -147,6 +157,89 @@ impl ResourceSummary {
             memory_percent(summary.memory_usage_bytes, summary.memory_limit_bytes);
         summary
     }
+}
+
+pub fn sorted_resource_rows(rows: &[ResourceRow]) -> Vec<ResourceRow> {
+    let mut rows = rows.to_vec();
+    rows.sort_by(|a, b| {
+        resource_pressure_rank(b)
+            .cmp(&resource_pressure_rank(a))
+            .then_with(|| {
+                b.cpu_percent
+                    .partial_cmp(&a.cpu_percent)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                b.memory_percent
+                    .partial_cmp(&a.memory_percent)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.container_name.cmp(&b.container_name))
+    });
+    rows
+}
+
+pub fn resource_pressure_hint(rows: &[ResourceRow]) -> Option<String> {
+    let row = sorted_resource_rows(rows)
+        .into_iter()
+        .find(|row| row.error.is_some() || row.cpu_percent >= 80.0 || row.memory_percent >= 85.0)?;
+    if let Some(error) = row.error {
+        return Some(format!("{} stats error: {error}", row.container_name));
+    }
+    if row.cpu_percent >= 80.0 {
+        return Some(format!("{} high CPU {:.1}%", row.container_name, row.cpu_percent));
+    }
+    Some(format!(
+        "{} high memory {:.1}%",
+        row.container_name, row.memory_percent
+    ))
+}
+
+pub fn resource_trend(previous: &ResourcePanelData, current: &ResourcePanelData) -> Option<ResourceTrend> {
+    if previous.project != current.project || previous.loading || current.loading {
+        return None;
+    }
+    Some(ResourceTrend {
+        cpu_delta_percent: current.summary.cpu_percent - previous.summary.cpu_percent,
+        memory_delta_bytes: current.summary.memory_usage_bytes as i128
+            - previous.summary.memory_usage_bytes as i128,
+        network_rx_delta_bytes: current.summary.network_rx_bytes as i128
+            - previous.summary.network_rx_bytes as i128,
+        network_tx_delta_bytes: current.summary.network_tx_bytes as i128
+            - previous.summary.network_tx_bytes as i128,
+        block_read_delta_bytes: current.summary.block_read_bytes as i128
+            - previous.summary.block_read_bytes as i128,
+        block_write_delta_bytes: current.summary.block_write_bytes as i128
+            - previous.summary.block_write_bytes as i128,
+    })
+}
+
+pub fn format_signed_bytes(bytes: i128) -> String {
+    let sign = if bytes > 0 {
+        "+"
+    } else if bytes < 0 {
+        "-"
+    } else {
+        ""
+    };
+    let value = bytes.unsigned_abs().min(u64::MAX as u128) as u64;
+    format!("{sign}{}", format_bytes(value))
+}
+
+fn resource_pressure_rank(row: &ResourceRow) -> usize {
+    if row.error.is_some() {
+        return 4;
+    }
+    if row.cpu_percent >= 80.0 {
+        return 3;
+    }
+    if row.memory_percent >= 85.0 {
+        return 2;
+    }
+    if row.cpu_percent >= 50.0 || row.memory_percent >= 70.0 {
+        return 1;
+    }
+    0
 }
 
 pub fn cpu_percent(

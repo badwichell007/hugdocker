@@ -81,6 +81,27 @@ fn config_supports_exact_prefix_and_image_prefix_groups() {
 }
 
 #[test]
+fn config_supports_custom_profile_groups() {
+    let config = toml::from_str::<AppConfig>(
+        r#"
+[profiles.groups]
+"frontend" = ["web*", "nginx*"]
+"data" = ["postgres*", "redis*"]
+"#,
+    )
+    .expect("profile config");
+
+    assert_eq!(
+        config.profiles.groups.get("frontend"),
+        Some(&vec!["web*".to_string(), "nginx*".to_string()])
+    );
+    assert_eq!(
+        config.profiles.groups.get("data"),
+        Some(&vec!["postgres*".to_string(), "redis*".to_string()])
+    );
+}
+
+#[test]
 fn snapshot_groups_compose_and_standalone_containers_in_one_pass() {
     let snapshot = fixture_snapshot();
 

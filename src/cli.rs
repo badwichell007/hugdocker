@@ -9,8 +9,10 @@ use crate::config::{config_path, load_config, timeline_log_path, write_default_c
 use crate::docker::{docker_cli_available, DockerClient};
 use crate::domain::{OperationAction, SortMode};
 use crate::health::{analyze_snapshot, global_findings, HealthReport};
+use crate::inbox::build_ops_inbox;
 use crate::ops::OperationPlanner;
 use crate::output::{print_json, print_projects};
+use crate::recipes::builtin_recipes;
 use crate::tui;
 use crate::{msg, AppResult};
 
@@ -23,8 +25,6 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// 使用内置 mock 数据体验 TUI，不连接 Docker daemon
-    Demo,
     /// 进入全屏 TUI
     Tui,
     /// 兼容旧版经典菜单，当前等价于 TUI
@@ -61,6 +61,11 @@ pub enum Commands {
     },
     /// 显示项目健康诊断
     Doctor {
+        #[arg(long)]
+        json: bool,
+    },
+    /// 输出 TUI Ops Inbox 的优先级动作队列
+    Inbox {
         #[arg(long)]
         json: bool,
     },
@@ -214,7 +219,6 @@ pub async fn run() -> AppResult<()> {
     let config = load_config();
 
     match cli.command.unwrap_or(Commands::Tui) {
-        Commands::Demo => tui::run_demo().await,
         Commands::Tui | Commands::Menu => {
             let client = DockerClient::connect(config)?;
             tui::run(client).await
@@ -279,6 +283,7 @@ pub async fn run() -> AppResult<()> {
             }
         }
         Commands::Doctor { json } => doctor_command(config, json).await,
+        Commands::Inbox { json } => inbox_command(config, json).await,
         Commands::Health { json } => health_command(config, json).await,
         Commands::Plan {
             action,
@@ -337,37 +342,17 @@ pub async fn run() -> AppResult<()> {
 }
 
 fn recipes_command(json: bool) -> AppResult<()> {
-    let recipes = vec![
-        serde_json::json!({
-            "name": "panic-stop",
-            "description": "停止选中项目的活动容器，适合临时释放端口/CPU。",
-            "command": "dockerctl stop <project> --dry-run"
-        }),
-        serde_json::json!({
-            "name": "rescue-unhealthy",
-            "description": "对 unhealthy/restarting 项目生成恢复计划。",
-            "command": "dockerctl rescue <project> --dry-run"
-        }),
-        serde_json::json!({
-            "name": "safe-cleanup",
-            "description": "查看可安全清理的悬空资源建议。",
-            "command": "dockerctl safe-prune"
-        }),
-        serde_json::json!({
-            "name": "preflight-delete",
-            "description": "删除前查看容器/网络/卷/镜像影响。",
-            "command": "dockerctl plan purge <project>"
-        }),
-    ];
+    let recipes = builtin_recipes();
     if json {
         print_json(&recipes)
     } else {
         for recipe in recipes {
             println!(
-                "{}\n  {}\n  {}\n",
-                recipe["name"].as_str().unwrap_or_default(),
-                recipe["description"].as_str().unwrap_or_default(),
-                recipe["command"].as_str().unwrap_or_default()
+                "{} [{}]\n  {}\n  {}\n",
+                recipe.name,
+                recipe.risk,
+                recipe.description,
+                recipe.command
             );
         }
         Ok(())
@@ -379,7 +364,7 @@ fn timeline_command(tail: usize) -> AppResult<()> {
     let content = std::fs::read_to_string(&path).unwrap_or_default();
     let lines = content.lines().rev().take(tail).collect::<Vec<_>>();
     for line in lines.into_iter().rev() {
-        println!("{line}");
+        println!("{}", format_timeline_line(line));
     }
     if content.is_empty() {
         println!("暂无时间线事件: {}", path.display());
@@ -388,12 +373,22 @@ fn timeline_command(tail: usize) -> AppResult<()> {
 }
 
 async fn profiles_command(config: crate::config::AppConfig, json: bool) -> AppResult<()> {
-    let client = DockerClient::connect(config)?;
+    let client = DockerClient::connect(config.clone())?;
     let snapshot = client.snapshot().await?;
     let mut profiles = std::collections::BTreeMap::<String, Vec<String>>::new();
     for project in snapshot.projects_sorted(SortMode::NameAsc) {
+        let configured = config
+            .profiles
+            .groups
+            .iter()
+            .find(|(_, patterns)| {
+                patterns
+                    .iter()
+                    .any(|pattern| profile_pattern_matches(pattern, &project.name))
+            })
+            .map(|(name, _)| name.clone());
         profiles
-            .entry(format!("{:?}", project.kind))
+            .entry(configured.unwrap_or_else(|| format!("{:?}", project.kind)))
             .or_default()
             .push(project.name);
     }
@@ -405,6 +400,46 @@ async fn profiles_command(config: crate::config::AppConfig, json: bool) -> AppRe
         }
         Ok(())
     }
+}
+
+async fn inbox_command(config: crate::config::AppConfig, json: bool) -> AppResult<()> {
+    let client = DockerClient::connect(config)?;
+    let snapshot = client.snapshot().await?;
+    let inbox = build_ops_inbox(&snapshot, None);
+    if json {
+        return print_json(&inbox);
+    }
+    for item in inbox.items {
+        println!(
+            "{:?} [{}] {}: {}\n  {}\n",
+            item.severity,
+            item.category,
+            item.project.as_deref().unwrap_or("global"),
+            item.title,
+            item.command
+        );
+    }
+    Ok(())
+}
+
+fn profile_pattern_matches(pattern: &str, project: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    pattern == project
+        || pattern
+            .strip_suffix('*')
+            .is_some_and(|prefix| project.starts_with(prefix))
+}
+
+fn format_timeline_line(line: &str) -> String {
+    let Ok(event) = serde_json::from_str::<crate::telemetry::TimelineEvent>(line) else {
+        return line.to_string();
+    };
+    format!(
+        "{} [{}:{}] {} - {}",
+        event.ts, event.source, event.action, event.actor, event.message
+    )
 }
 
 async fn doctor_command(config: crate::config::AppConfig, json: bool) -> AppResult<()> {

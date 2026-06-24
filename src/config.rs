@@ -12,6 +12,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub groups: GroupConfig,
     #[serde(default)]
+    pub profiles: ProfileConfig,
+    #[serde(default)]
     pub tui: TuiConfig,
     #[serde(default)]
     pub safety: SafetyConfig,
@@ -21,6 +23,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             groups: GroupConfig::default(),
+            profiles: ProfileConfig::default(),
             tui: TuiConfig::default(),
             safety: SafetyConfig::default(),
         }
@@ -35,6 +38,12 @@ pub struct GroupConfig {
     pub prefix: Vec<(String, String)>,
     #[serde(default)]
     pub image_prefix: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileConfig {
+    #[serde(default)]
+    pub groups: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

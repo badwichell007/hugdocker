@@ -7,6 +7,7 @@ pub mod health;
 pub mod inbox;
 pub mod ops;
 pub mod output;
+pub mod recipes;
 pub mod resources;
 pub mod telemetry;
 pub mod tui;

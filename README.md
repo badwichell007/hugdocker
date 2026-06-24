@@ -7,7 +7,7 @@
 面向 Linux 日常运维的高性能 Docker TUI/CLI。以项目为中心聚合 Compose、Stack 和 standalone 容器，提供资源监控、风险预演、安全执行、异常恢复、审计时间线和脚本化 JSON 输出。
 
 [![CI](https://github.com/badwichell007/dockerctl/actions/workflows/ci.yml/badge.svg)](https://github.com/badwichell007/dockerctl/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/badge/release-v0.2.2-0ea5e9)](https://github.com/badwichell007/dockerctl/releases)
+[![Release](https://img.shields.io/badge/release-v0.3.0-0ea5e9)](https://github.com/badwichell007/dockerctl/releases)
 [![Rust](https://img.shields.io/badge/Rust-2024-f97316)](https://www.rust-lang.org/)
 [![TUI](https://img.shields.io/badge/TUI-ratatui%20%2B%20crossterm-22c55e)](https://ratatui.rs/)
 [![Docker API](https://img.shields.io/badge/Docker%20API-bollard-2563eb)](https://github.com/fussybeaver/bollard)
@@ -120,7 +120,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ### 指定版本
 
 ```bash
-DOCKERCTL_VERSION=v0.2.2 curl -fsSL https://raw.githubusercontent.com/badwichell007/dockerctl/main/scripts/install.sh | bash
+DOCKERCTL_VERSION=v0.3.0 curl -fsSL https://raw.githubusercontent.com/badwichell007/dockerctl/main/scripts/install.sh | bash
 ```
 
 ### 源码安装
@@ -170,14 +170,6 @@ dockerctl completion fish > ~/.config/fish/completions/dockerctl.fish
 ```bash
 dockerctl
 ```
-
-无 Docker 环境先体验高级界面：
-
-```bash
-dockerctl demo
-```
-
-`demo` 使用内置 mock snapshot 和 mock resource data，不连接 Docker daemon，不执行真实 start/stop/restart/remove/purge/prune，也不会写入真实审计日志。
 
 列出项目：
 
@@ -231,7 +223,7 @@ dockerctl timeline --watch
 | 目标 | 命令 |
 | --- | --- |
 | 进入 TUI | `dockerctl` |
-| Demo 体验 | `dockerctl demo` |
+| 运维收件箱 | `dockerctl inbox --json` |
 | 项目清单 | `dockerctl list --json` |
 | 风险诊断 | `dockerctl doctor --json` |
 | 资源采样 | `dockerctl stats <container> --json` |
@@ -239,6 +231,7 @@ dockerctl timeline --watch
 | 异常恢复 | `dockerctl rescue myapp --dry-run` |
 | 安全清理 | `dockerctl safe-prune --dry-run` |
 | 事件时间线 | `dockerctl timeline --tail 100` |
+| 本地配方 | `dockerctl recipes --json` |
 
 ## TUI 使用教程
 
@@ -248,19 +241,11 @@ dockerctl timeline --watch
 dockerctl
 ```
 
-没有 Docker daemon 或想先看界面：
-
-```bash
-dockerctl demo
-```
-
-Demo 模式会在 Header 显示 `DEMO mock data`，允许打开 plan、doctor、logs、resources 等面板；执行确认只显示 `demo mode: execution skipped`，不会调用 Docker API。
-
 TUI 采用 Ops Cockpit 布局：
 
 | 区域 | 说明 |
 | --- | --- |
-| Header | 当前运行模式、排序方式、过滤条件、选中数量、LIVE/DEMO 状态 |
+| Header | 当前运行模式、排序方式、过滤条件、选中数量、LIVE 状态 |
 | KPI Strip | 项目总数、活动项目、风险项目、已选项目、当前可见项目 |
 | Projects / Risk Radar | 项目列表，强化 State、Risk、Active、Ports 和选择状态 |
 | Ops Deck | Ops Inbox、详情、诊断、日志入口、资源监视、风险预演、恢复预案 |
@@ -374,14 +359,6 @@ Remove / Purge / Prune
 危险动作会显示 `Safety Rail`，并要求输入确认令牌。鼠标点击不会直接执行删除或完全删除。
 
 ## CLI 使用教程
-
-### Demo 模式
-
-```bash
-dockerctl demo
-```
-
-Demo 模式用于 README、Release、社交媒体或没有 Docker daemon 的机器上快速展示 TUI。它只读取内置 mock 数据，不会连接 `/var/run/docker.sock`。
 
 ### 查看项目
 
@@ -553,9 +530,15 @@ allow_yes_for_purge = false
 [group_image_prefix]
 "redis:" = "cache"
 "postgres:" = "database"
+
+[profiles.groups]
+"frontend" = ["web*", "nginx*"]
+"data" = ["postgres*", "redis*", "mysql*"]
+"ops" = ["grafana*", "prometheus*", "loki*"]
 ```
 
 配置后，standalone 容器会按容器名或镜像名前缀归到对应项目组。
+`profiles.groups` 支持精确匹配和尾部 `*` 前缀匹配，用来把 Compose、Stack 或 standalone 项目按业务域输出到 `dockerctl profiles`。
 
 ## 技术架构
 
@@ -686,16 +669,11 @@ OperationAction -> OperationPlan -> Confirmation -> Executor -> Audit
 
 `dockerctl` 的路线会继续围绕“本地 Docker 日常运维 cockpit”推进，不追求做成重量级 Web 平台。
 
-### v0.2.x
-
-- 打磨 Ops Cockpit 视觉细节：更好的窄屏布局、面板密度、状态色和右键菜单体验。
-- 完善 Demo 模式：覆盖更多异常场景、资源错误、批量选择和安全确认演示。
-- 增强 Resource Monitor：增加项目级趋势快照、排序、高 CPU/高内存容器优先提示。
-- 提升日志面板：支持 TUI 内按容器切换、过滤关键字、高亮 error/warn。
-- 改进 release 体验：补充截图、录屏、安装包说明和 shell completion 文档。
-
 ### v0.3.x
 
+- 打磨 Ops Cockpit 视觉细节：更好的窄屏布局、面板密度、状态色和右键菜单体验。
+- 增强 Resource Monitor：增加项目级趋势快照、排序、高 CPU/高内存容器优先提示。
+- 提升日志面板：支持 TUI 内按容器切换、过滤关键字、高亮 error/warn。
 - 引入 Recipes 编排：把常用动作流做成可复用的本地运维配方，例如 panic-stop、rescue-unhealthy、preflight-delete。
 - 增强 Timeline：把 Docker events、操作审计和健康变化聚合成更可读的事件流。
 - 增强 Doctor：加入端口冲突、匿名卷、孤儿网络、镜像膨胀、restart loop 等更细的诊断规则。
@@ -718,21 +696,30 @@ OperationAction -> OperationPlan -> Confirmation -> Executor -> Audit
 
 ## 更新日志
 
+### v0.3.0
+
+- 移除 `dockerctl demo`，回到真实 Docker socket 优先的本地运维工具定位。
+- 新增 `dockerctl inbox`，把 TUI Ops Inbox 的优先级动作队列开放给 CLI 和 JSON 自动化。
+- Resource Monitor 增加压力排序、hotspot 提示和项目级相邻采样趋势，高 CPU、高内存、stats error 优先展示。
+- Log Lens 升级为专用面板，展示当前容器、关键字过滤、`n/p` 容器切换和 error/warn/panic 高亮规则。
+- Doctor 增强端口冲突、公网监听、匿名卷、孤儿网络/卷、镜像膨胀、restart loop 和 standalone 自定义网络提示。
+- Ops Cockpit 优化窄屏左右栏密度，右键菜单增加明确选中标记，鼠标管理状态更直观。
+- Recipes 改为稳定模型输出，提供 panic-stop、rescue-unhealthy、preflight-delete、safe-cleanup。
+- Profiles 支持 `[profiles.groups]` 自定义项目分组匹配，便于按业务域组织 standalone 容器。
+- Timeline CLI 将 JSONL 事件格式化为更可读的事件流。
+
 ### v0.2.2
 
 - 新增 Ops Inbox：默认面板直接汇总 Critical、Resource Pressure、Cleanup 和 Next Action。
 - 新增独立 `inbox` 模型：从 Docker snapshot 和当前资源采样生成可测试的待处理队列。
-- Demo 模式展示完整 Inbox 效果，包含 unhealthy、restarting、高 CPU、高内存、stats error 和 safe-prune 建议。
 - TUI 新增 `b` 快捷键，用户可以从任意面板快速回到 Inbox。
 - README 增加 Ops Inbox 教程，强调“打开就知道下一步该处理什么”。
 
 ### v0.2.1
 
-- 新增 `dockerctl demo`：使用内置 mock 项目和 mock resource data 启动 TUI，不需要 Docker daemon。
 - TUI 默认升级为 `cockpit` 主题：Header、KPI Strip、Projects / Risk Radar、Ops Deck 和 Command Bar 统一为 Ops Cockpit 视觉层级。
-- Demo 模式增加安全边界：可打开 plan、doctor、logs、resources 等界面，但执行确认只显示 mock-safe 状态，不调用 Docker API。
 - Resource Monitor 视觉增强：CPU/MEM/NET/IO 改为 cockpit KPI 指标块，loading、empty、error、refreshing 状态更直观。
-- 信息架构优化：Header 显示 LIVE/DEMO、mode、sort、filter、selection；项目表强化 state、risk、active、ports。
+- 信息架构优化：Header 显示运行模式、sort、filter、selection；项目表强化 state、risk、active、ports。
 
 ### v0.2.0
 

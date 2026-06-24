@@ -19,3 +19,8 @@ allow_yes_for_purge = false
 [group_image_prefix]
 "redis:" = "cache"
 "postgres:" = "database"
+
+[profiles.groups]
+"frontend" = ["web*", "nginx*"]
+"data" = ["postgres*", "redis*", "mysql*"]
+"ops" = ["grafana*", "prometheus*", "loki*"]

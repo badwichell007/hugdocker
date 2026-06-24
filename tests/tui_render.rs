@@ -2,12 +2,11 @@ use std::collections::BTreeMap;
 
 use dockerctl::config::{AppConfig, ThemeName};
 use dockerctl::domain::{Container, ContainerState, DockerSnapshot, OperationAction, SortMode};
-use dockerctl::resources::{ResourcePanelData, ResourceRow};
+use dockerctl::resources::{ResourcePanelData, ResourceRow, ResourceTrend};
 use dockerctl::tui::{
-    apply_demo_execution, apply_mouse_action, begin_execution_prompt, demo_dashboard_state,
-    execution_plan_if_confirmed, mark_resource_refresh_pending, mouse_action_for_event,
-    push_execution_token, render_dashboard, ContextMenuItem, ContextMenuState, DashboardState,
-    MouseAction, TuiPanel,
+    apply_mouse_action, begin_execution_prompt, execution_plan_if_confirmed,
+    mark_resource_refresh_pending, mouse_action_for_event, push_execution_token, render_dashboard,
+    ContextMenuItem, ContextMenuState, DashboardState, MouseAction, TuiPanel,
 };
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::backend::TestBackend;
@@ -181,27 +180,16 @@ fn cockpit_theme_renders_ops_cockpit_language() {
 }
 
 #[test]
-fn demo_dashboard_renders_mock_data_badge() {
-    let mut state = demo_dashboard_state();
-
-    let backend = TestBackend::new(130, 38);
-    let mut terminal = Terminal::new(backend).expect("terminal");
-    terminal
-        .draw(|frame| render_dashboard(frame, &mut state))
-        .expect("draw");
-
-    let rendered = format!("{:?}", terminal.backend().buffer());
-
-    assert!(rendered.contains("DEMO"));
-    assert!(rendered.contains("mock data"));
-    assert!(rendered.contains("api-gateway"));
-    assert!(rendered.contains("postgres-dev"));
-}
-
-#[test]
 fn ops_inbox_panel_renders_prioritized_next_actions() {
-    let mut state = demo_dashboard_state();
+    let mut state = DashboardState::from_snapshot(sample_snapshot(), SortMode::Severity);
     state.panel = TuiPanel::Inbox;
+    state.resource_data = Some(ResourcePanelData::sampled(
+        "mingli",
+        1_000,
+        vec![ResourceRow::ok(
+            "web", "web_1", "UP", 91.0, 900, 1_000, 10, 20, 30, 40,
+        )],
+    ));
 
     let backend = TestBackend::new(140, 40);
     let mut terminal = Terminal::new(backend).expect("terminal");
@@ -215,21 +203,8 @@ fn ops_inbox_panel_renders_prioritized_next_actions() {
     assert!(rendered.contains("Critical"));
     assert!(rendered.contains("Resource Pressure"));
     assert!(rendered.contains("Next Action"));
-    assert!(rendered.contains("api-gateway"));
+    assert!(rendered.contains("mingli"));
     assert!(rendered.contains("dockerctl rescue"));
-}
-
-#[test]
-fn demo_execution_only_updates_status() {
-    let mut state = demo_dashboard_state();
-    state.panel = TuiPanel::Plan(OperationAction::Restart);
-    begin_execution_prompt(&mut state);
-
-    apply_demo_execution(&mut state);
-
-    assert!(state.execution_prompt.is_none());
-    assert!(state.status.contains("demo mode"));
-    assert!(state.status.contains("execution skipped"));
 }
 
 #[test]
@@ -456,9 +431,11 @@ fn logs_panel_renders_log_lens_controls() {
 
     assert!(rendered.contains("Ops Deck / Logs"));
     assert!(rendered.contains("Log Lens"));
-    assert!(rendered.contains("tail"));
-    assert!(rendered.contains("pause"));
-    assert!(rendered.contains("follow"));
+    assert!(rendered.contains("Keyword Filter"));
+    assert!(rendered.contains("Selected Container"));
+    assert!(rendered.contains("ERROR"));
+    assert!(rendered.contains("WARN"));
+    assert!(rendered.contains("n/p switch container"));
     assert!(rendered.contains("dockerctl logs web"));
 }
 
@@ -482,7 +459,39 @@ fn resources_panel_renders_resource_monitor_summary() {
     assert!(rendered.contains("MEM"));
     assert!(rendered.contains("NET"));
     assert!(rendered.contains("IO"));
-    assert!(rendered.contains("dockerctl stats web"));
+    assert!(rendered.contains("hotspot"));
+}
+
+#[test]
+fn resources_panel_renders_project_trend_snapshot() {
+    let snapshot = sample_snapshot();
+    let mut state = DashboardState::from_snapshot(snapshot, SortMode::Severity);
+    state.panel = TuiPanel::Resources;
+    state.resource_data = Some(ResourcePanelData::sampled(
+        "mingli",
+        2_000,
+        vec![ResourceRow::ok(
+            "web", "web_1", "UP", 18.5, 180, 1_000, 140, 260, 360, 520,
+        )],
+    ));
+    state.resource_trend = Some(ResourceTrend {
+        cpu_delta_percent: 8.5,
+        memory_delta_bytes: 80,
+        network_rx_delta_bytes: 40,
+        network_tx_delta_bytes: 60,
+        block_read_delta_bytes: 60,
+        block_write_delta_bytes: 120,
+    });
+
+    let backend = TestBackend::new(140, 40);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| render_dashboard(frame, &mut state))
+        .expect("draw");
+
+    let rendered = format!("{:?}", terminal.backend().buffer());
+
+    assert!(rendered.contains("trend +8.5%"));
 }
 
 #[test]

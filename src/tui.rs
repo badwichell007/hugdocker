@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -24,11 +24,14 @@ use tokio::task::JoinHandle;
 
 use crate::config::{parse_theme, ThemeName};
 use crate::docker::DockerClient;
-use crate::domain::{Container, ContainerState, DockerSnapshot, OperationAction, Project, SortMode};
+use crate::domain::{DockerSnapshot, OperationAction, Project, SortMode};
 use crate::health::{analyze_snapshot, global_findings};
 use crate::inbox::{build_ops_inbox, InboxItem, InboxSeverity};
 use crate::ops::{OperationPlan, OperationPlanner};
-use crate::resources::{format_bytes, ResourcePanelData, ResourceRow};
+use crate::resources::{
+    format_bytes, format_signed_bytes, resource_pressure_hint, resource_trend,
+    sorted_resource_rows, ResourcePanelData, ResourceRow, ResourceTrend,
+};
 use crate::{msg, AppResult};
 
 const HEADER_ROWS: u16 = 3;
@@ -53,12 +56,6 @@ const CONTEXT_MENU_ITEMS: [ContextMenuItem; 10] = [
 
 pub async fn run(client: DockerClient) -> AppResult<()> {
     let mut app = TuiApp::new(client).await?;
-    let terminal = TerminalSession::enter()?;
-    app.run(terminal).await
-}
-
-pub async fn run_demo() -> AppResult<()> {
-    let mut app = TuiApp::demo();
     let terminal = TerminalSession::enter()?;
     app.run(terminal).await
 }
@@ -191,7 +188,8 @@ pub struct DashboardState {
     pub context_menu: Option<ContextMenuState>,
     pub execution_prompt: Option<ExecutionPrompt>,
     pub resource_data: Option<ResourcePanelData>,
-    pub demo_mode: bool,
+    pub resource_trend: Option<ResourceTrend>,
+    pub log_container_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,7 +220,8 @@ impl DashboardState {
             context_menu: None,
             execution_prompt: None,
             resource_data: None,
-            demo_mode: false,
+            resource_trend: None,
+            log_container_index: 0,
         };
         state.rebuild_filtered();
         state
@@ -342,250 +341,6 @@ pub fn execution_plan_if_confirmed(state: &DashboardState) -> AppResult<Option<O
     Ok(Some(plan))
 }
 
-pub fn apply_demo_execution(state: &mut DashboardState) {
-    state.execution_prompt = None;
-    state.status = "demo mode: execution skipped; no Docker API call was made.".to_string();
-}
-
-pub fn demo_dashboard_state() -> DashboardState {
-    let snapshot = DockerSnapshot::from_containers(
-        demo_containers(),
-        vec![
-            "edge_default".into(),
-            "payments_net".into(),
-            "observability".into(),
-            "postgres-dev".into(),
-        ],
-        vec![
-            "edge_cache".into(),
-            "payments_pgdata".into(),
-            "postgres_dev_data".into(),
-            "grafana_data".into(),
-        ],
-        vec![
-            "ghcr.io/example/edge:0.2.1".into(),
-            "ghcr.io/example/payments:2.8.4".into(),
-            "postgres:16".into(),
-            "redis:7".into(),
-            "grafana/grafana:latest".into(),
-        ],
-        &crate::config::AppConfig::default(),
-    );
-    let mut state = DashboardState::from_snapshot(snapshot, SortMode::Severity);
-    state.theme = ThemeName::Cockpit;
-    state.demo_mode = true;
-    state.status = "DEMO mode: mock data only; Docker execution is disabled.".to_string();
-    state.resource_data = Some(demo_resource_data_for_project("edge"));
-    state
-}
-
-fn demo_containers() -> Vec<Container> {
-    vec![
-        demo_container(
-            "edge-web-1",
-            "edge_web_1",
-            "ghcr.io/example/edge:0.2.1",
-            ContainerState::Running,
-            "Up 47 minutes",
-            Some("edge".into()),
-            None,
-            vec!["edge_default"],
-            vec!["edge_cache"],
-            vec!["127.0.0.1:8080->80/tcp"],
-        ),
-        demo_container(
-            "edge-worker-1",
-            "edge_worker_1",
-            "ghcr.io/example/edge:0.2.1",
-            ContainerState::Unhealthy,
-            "Up 6 minutes (unhealthy)",
-            Some("edge".into()),
-            None,
-            vec!["edge_default"],
-            vec![],
-            vec![],
-        ),
-        demo_container(
-            "api-gateway-1",
-            "api_gateway_1",
-            "ghcr.io/example/gateway:1.4.9",
-            ContainerState::Restarting,
-            "Restarting (1) 14 seconds ago",
-            Some("api-gateway".into()),
-            None,
-            vec!["edge_default", "payments_net"],
-            vec![],
-            vec!["0.0.0.0:8443->443/tcp"],
-        ),
-        demo_container(
-            "payments-api-1",
-            "payments_api_1",
-            "ghcr.io/example/payments:2.8.4",
-            ContainerState::Running,
-            "Up 3 hours",
-            Some("payments".into()),
-            None,
-            vec!["payments_net"],
-            vec![],
-            vec!["127.0.0.1:9000->9000/tcp"],
-        ),
-        demo_container(
-            "postgres-dev",
-            "postgres-dev",
-            "postgres:16",
-            ContainerState::Paused,
-            "Up 2 days (Paused)",
-            None,
-            None,
-            vec!["postgres-dev"],
-            vec!["postgres_dev_data"],
-            vec!["127.0.0.1:5432->5432/tcp"],
-        ),
-        demo_container(
-            "observability-grafana-1",
-            "observability_grafana_1",
-            "grafana/grafana:latest",
-            ContainerState::Running,
-            "Up 26 hours",
-            None,
-            Some("observability".into()),
-            vec!["observability"],
-            vec!["grafana_data"],
-            vec!["127.0.0.1:3000->3000/tcp"],
-        ),
-        demo_container(
-            "redis-cache",
-            "redis-cache",
-            "redis:7",
-            ContainerState::Exited,
-            "Exited (0) 4 hours ago",
-            None,
-            None,
-            vec!["edge_default"],
-            vec!["edge_cache"],
-            vec![],
-        ),
-    ]
-}
-
-#[allow(clippy::too_many_arguments)]
-fn demo_container(
-    id: &str,
-    name: &str,
-    image: &str,
-    state: ContainerState,
-    status: &str,
-    compose_project: Option<String>,
-    stack_namespace: Option<String>,
-    networks: Vec<&str>,
-    volumes: Vec<&str>,
-    ports: Vec<&str>,
-) -> Container {
-    let mut labels = BTreeMap::new();
-    if let Some(project) = compose_project.as_ref() {
-        labels.insert("com.docker.compose.project".into(), project.clone());
-    }
-    if let Some(stack) = stack_namespace.as_ref() {
-        labels.insert("com.docker.stack.namespace".into(), stack.clone());
-    }
-    Container {
-        id: id.into(),
-        name: name.into(),
-        image: image.into(),
-        state,
-        status: status.into(),
-        compose_project,
-        stack_namespace,
-        labels,
-        networks: networks.into_iter().map(str::to_string).collect(),
-        volumes: volumes.into_iter().map(str::to_string).collect(),
-        ports: ports.into_iter().map(str::to_string).collect(),
-    }
-}
-
-fn demo_resource_data_for_project(project: &str) -> ResourcePanelData {
-    let sampled_at_ms = crate::audit::now_unix_millis();
-    let rows = match project {
-        "edge" => vec![
-            ResourceRow::ok(
-                "edge-web-1",
-                "edge_web_1",
-                "UP",
-                12.5,
-                512 * 1024 * 1024,
-                2 * 1024 * 1024 * 1024,
-                4_400_000,
-                1_900_000,
-                171_400_000,
-                616_000,
-            ),
-            ResourceRow::ok(
-                "edge-worker-1",
-                "edge_worker_1",
-                "UNHL",
-                86.4,
-                1790 * 1024 * 1024,
-                2 * 1024 * 1024 * 1024,
-                2_800_000,
-                1_100_000,
-                94_000_000,
-                44_000_000,
-            ),
-            ResourceRow::error(
-                "edge-sidecar",
-                "edge_sidecar_1",
-                "ERR",
-                "mock stats timeout",
-            ),
-        ],
-        "api-gateway" => vec![ResourceRow::ok(
-            "api-gateway-1",
-            "api_gateway_1",
-            "RSTR",
-            64.7,
-            740 * 1024 * 1024,
-            1024 * 1024 * 1024,
-            6_200_000,
-            5_100_000,
-            21_000_000,
-            9_000_000,
-        )],
-        "payments" => vec![ResourceRow::ok(
-            "payments-api-1",
-            "payments_api_1",
-            "UP",
-            18.2,
-            384 * 1024 * 1024,
-            1536 * 1024 * 1024,
-            1_400_000,
-            980_000,
-            49_000_000,
-            7_500_000,
-        )],
-        "observability" => vec![ResourceRow::ok(
-            "observability-grafana-1",
-            "observability_grafana_1",
-            "UP",
-            7.9,
-            690 * 1024 * 1024,
-            2 * 1024 * 1024 * 1024,
-            900_000,
-            1_200_000,
-            18_000_000,
-            12_000_000,
-        )],
-        "postgres-dev" => vec![ResourceRow::error(
-            "postgres-dev",
-            "postgres-dev",
-            "PAUS",
-            "mock stats paused: container is paused",
-        )],
-        "redis-cache" => Vec::new(),
-        _ => Vec::new(),
-    };
-    ResourcePanelData::sampled(project, sampled_at_ms, rows).with_stale(true)
-}
-
 pub fn mark_resource_refresh_pending(
     current: Option<ResourcePanelData>,
     project: &str,
@@ -601,6 +356,13 @@ pub fn mark_resource_refresh_pending(
         }
         _ => Some(ResourcePanelData::loading(project.to_string())),
     }
+}
+
+fn current_resource_trend(
+    previous: Option<&ResourcePanelData>,
+    current: Option<&ResourcePanelData>,
+) -> Option<ResourceTrend> {
+    resource_trend(previous?, current?)
 }
 
 pub fn apply_mouse_action(state: &mut DashboardState, action: MouseAction) {
@@ -688,17 +450,19 @@ struct TuiApp {
     context_menu: Option<ContextMenuState>,
     execution_prompt: Option<ExecutionPrompt>,
     resource_data: Option<ResourcePanelData>,
+    resource_previous: Option<ResourcePanelData>,
     resource_task: Option<JoinHandle<ResourcePanelData>>,
     resource_refresh_interval: Duration,
     last_refresh: Instant,
     last_resource_refresh: Option<Instant>,
-    demo_mode: bool,
+    log_container_index: usize,
 }
 
 impl TuiApp {
     async fn new(client: DockerClient) -> AppResult<Self> {
         let theme = parse_theme(&client.config().tui.theme);
-        let resource_refresh_interval = Duration::from_millis(client.config().tui.refresh_ms.max(250));
+        let resource_refresh_interval =
+            Duration::from_millis(client.config().tui.refresh_ms.max(250));
         let snapshot = client.snapshot().await?;
         let mut app = Self {
             client: Some(client),
@@ -715,41 +479,15 @@ impl TuiApp {
             context_menu: None,
             execution_prompt: None,
             resource_data: None,
+            resource_previous: None,
             resource_task: None,
             resource_refresh_interval,
             last_refresh: Instant::now(),
             last_resource_refresh: None,
-            demo_mode: false,
+            log_container_index: 0,
         };
         app.rebuild_filtered();
         Ok(app)
-    }
-
-    fn demo() -> Self {
-        let mut state = demo_dashboard_state();
-        let mut app = Self {
-            client: None,
-            snapshot: state.snapshot,
-            filtered: Vec::new(),
-            selected: BTreeSet::new(),
-            list_state: ListState::default(),
-            filter: String::new(),
-            running_only: false,
-            sort_mode: SortMode::Severity,
-            theme: ThemeName::Cockpit,
-            panel: TuiPanel::Detail,
-            status: "DEMO mode: mock data only; Docker execution is disabled.".to_string(),
-            context_menu: None,
-            execution_prompt: None,
-            resource_data: state.resource_data.take(),
-            resource_task: None,
-            resource_refresh_interval: Duration::from_millis(2_000),
-            last_refresh: Instant::now(),
-            last_resource_refresh: Some(Instant::now()),
-            demo_mode: true,
-        };
-        app.rebuild_filtered();
-        app
     }
 
     async fn run(&mut self, mut session: TerminalSession) -> AppResult<()> {
@@ -806,7 +544,11 @@ impl TuiApp {
             context_menu: self.context_menu.clone(),
             execution_prompt: self.execution_prompt.clone(),
             resource_data: self.resource_data.clone(),
-            demo_mode: self.demo_mode,
+            resource_trend: current_resource_trend(
+                self.resource_previous.as_ref(),
+                self.resource_data.as_ref(),
+            ),
+            log_container_index: self.log_container_index,
         };
         state.table_state.select(self.list_state.selected());
         apply_mouse_action(&mut state, action);
@@ -816,6 +558,7 @@ impl TuiApp {
         self.context_menu = state.context_menu;
         self.execution_prompt = state.execution_prompt;
         self.resource_data = state.resource_data;
+        self.log_container_index = state.log_container_index;
         self.list_state.select(state.table_state.selected());
         Ok(true)
     }
@@ -920,6 +663,14 @@ impl TuiApp {
                 self.context_menu = None;
                 self.panel = TuiPanel::Logs;
             }
+            KeyCode::Char('n') if self.panel == TuiPanel::Logs => {
+                self.context_menu = None;
+                self.shift_log_container(1);
+            }
+            KeyCode::Char('p') if self.panel == TuiPanel::Logs => {
+                self.context_menu = None;
+                self.shift_log_container(-1);
+            }
             KeyCode::Char('m') => {
                 self.context_menu = None;
                 self.panel = TuiPanel::Resources;
@@ -1003,13 +754,6 @@ impl TuiApp {
         };
         let action = plan.action;
         self.status = format!("正在执行 {} ...", operation_label(action));
-        if self.demo_mode {
-            let mut state = self.dashboard_state();
-            apply_demo_execution(&mut state);
-            self.execution_prompt = state.execution_prompt;
-            self.status = state.status;
-            return Ok(());
-        }
         let Some(client) = self.client.as_ref() else {
             self.execution_prompt = None;
             self.status = "Docker client is not available in this TUI session.".to_string();
@@ -1028,20 +772,6 @@ impl TuiApp {
     }
 
     async fn refresh(&mut self) -> AppResult<()> {
-        if self.demo_mode {
-            self.last_refresh = Instant::now();
-            self.rebuild_filtered();
-            if self.panel == TuiPanel::Resources {
-                self.resource_data = Some(demo_resource_data_for_project(
-                    self.current_project()
-                        .map(|project| project.name.as_str())
-                        .unwrap_or("demo"),
-                ));
-                self.last_resource_refresh = Some(Instant::now());
-            }
-            self.status = "DEMO mode: mock data refreshed; no Docker API call was made.".to_string();
-            return Ok(());
-        }
         let Some(client) = self.client.as_ref() else {
             self.status = "Docker client is not available in this TUI session.".to_string();
             return Ok(());
@@ -1128,6 +858,27 @@ impl TuiApp {
             .and_then(|index| self.filtered.get(index))
     }
 
+    fn shift_log_container(&mut self, delta: isize) {
+        let len = self
+            .current_project()
+            .map(|project| project.containers.len())
+            .unwrap_or(0);
+        if len == 0 {
+            self.log_container_index = 0;
+            return;
+        }
+        self.log_container_index = if delta.is_negative() {
+            self.log_container_index.saturating_sub(delta.unsigned_abs())
+        } else {
+            (self.log_container_index + delta as usize).min(len - 1)
+        };
+        self.status = format!(
+            "Log Lens 容器 {}/{}，使用 / 更新关键字过滤。",
+            self.log_container_index + 1,
+            len
+        );
+    }
+
     fn dashboard_state(&self) -> DashboardState {
         let mut state = DashboardState {
             snapshot: self.snapshot.clone(),
@@ -1143,7 +894,11 @@ impl TuiApp {
             context_menu: self.context_menu.clone(),
             execution_prompt: self.execution_prompt.clone(),
             resource_data: self.resource_data.clone(),
-            demo_mode: self.demo_mode,
+            resource_trend: current_resource_trend(
+                self.resource_previous.as_ref(),
+                self.resource_data.as_ref(),
+            ),
+            log_container_index: self.log_container_index,
         };
         state.table_state.select(self.list_state.selected());
         state
@@ -1160,6 +915,15 @@ impl TuiApp {
         match task.now_or_never() {
             Some(Ok(data)) => {
                 self.last_resource_refresh = Some(Instant::now());
+                if self
+                    .resource_data
+                    .as_ref()
+                    .is_some_and(|previous| previous.project == data.project && !previous.loading)
+                {
+                    self.resource_previous = self.resource_data.clone();
+                } else {
+                    self.resource_previous = None;
+                }
                 self.resource_data = Some(data);
             }
             Some(Err(err)) => {
@@ -1168,6 +932,11 @@ impl TuiApp {
                     .map(|project| project.name.clone())
                     .unwrap_or_else(|| "unknown".to_string());
                 self.last_resource_refresh = Some(Instant::now());
+                self.resource_previous = self
+                    .resource_data
+                    .as_ref()
+                    .filter(|previous| previous.project == project && !previous.loading)
+                    .cloned();
                 self.resource_data = Some(ResourcePanelData::sampled(
                     project,
                     crate::audit::now_unix_millis(),
@@ -1193,6 +962,7 @@ impl TuiApp {
         let Some(project) = self.current_project().cloned() else {
             let changed = self.resource_data.is_some();
             self.resource_data = None;
+            self.resource_previous = None;
             return changed;
         };
         let current_project = project.name.clone();
@@ -1211,11 +981,8 @@ impl TuiApp {
 
         self.resource_data =
             mark_resource_refresh_pending(self.resource_data.take(), &current_project);
-
-        if self.demo_mode {
-            self.resource_data = Some(demo_resource_data_for_project(&current_project));
-            self.last_resource_refresh = Some(Instant::now());
-            return true;
+        if needs_project_sample {
+            self.resource_previous = None;
         }
 
         let Some(client) = self.client.clone() else {
@@ -1265,9 +1032,13 @@ pub fn render_dashboard(frame: &mut ratatui::Frame, state: &mut DashboardState) 
     render_header(frame, outer[0], state);
     render_metric_bar(frame, outer[1], state);
 
+    let left_width = if area.width < 110 { 42 } else { 48 };
     let main = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+        .constraints([
+            Constraint::Percentage(left_width),
+            Constraint::Percentage(100 - left_width),
+        ])
         .split(outer[2]);
     render_projects_table(frame, main[0], state);
     render_ops_deck(frame, main[1], state);
@@ -1321,17 +1092,7 @@ fn render_header(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state:
     } else {
         &state.filter
     };
-    let demo_badge = if state.demo_mode {
-        Span::styled(
-            " DEMO mock data ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(palette.warning)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        Span::styled(" LIVE docker socket ", Style::default().fg(palette.muted))
-    };
+    let live_badge = Span::styled(" LIVE docker socket ", Style::default().fg(palette.muted));
     let title = Line::from(vec![
         Span::styled(
             " OPS COCKPIT ",
@@ -1346,7 +1107,7 @@ fn render_header(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state:
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" | ", Style::default().fg(palette.muted)),
-        demo_badge,
+        live_badge,
         Span::styled(
             format!(
                 " mode:{} selected:{} sort:{:?} filter:{} ",
@@ -1596,6 +1357,10 @@ fn render_ops_deck(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, stat
         render_resources_panel(frame, area, state);
         return;
     }
+    if state.panel == TuiPanel::Logs {
+        render_logs_panel(frame, area, state);
+        return;
+    }
 
     let palette = theme_palette(state.theme);
     let title = match state.panel {
@@ -1825,6 +1590,199 @@ fn text_lines(text: String) -> Vec<Line<'static>> {
         .collect()
 }
 
+fn render_logs_panel(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    state: &DashboardState,
+) {
+    let palette = theme_palette(state.theme);
+    let block = Block::default()
+        .title("Ops Deck / Logs / Log Lens")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(palette.accent))
+        .style(Style::default().bg(palette.surface));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(6),
+            Constraint::Min(8),
+            Constraint::Length(3),
+        ])
+        .split(inner);
+
+    let Some(project) = state.current_project() else {
+        frame.render_widget(
+            Paragraph::new("Log Lens\nNo project matches current filter.")
+                .style(Style::default().fg(palette.muted).bg(palette.surface)),
+            inner,
+        );
+        return;
+    };
+    let filter = log_filter_label(state);
+    let selected_index = state.log_container_index.min(project.containers.len().saturating_sub(1));
+    let selected_number = if project.containers.is_empty() {
+        0
+    } else {
+        selected_index + 1
+    };
+    let selected_container = project.containers.get(selected_index);
+    let target = selected_container
+        .map(|container| container.id.as_str())
+        .unwrap_or(project.name.as_str());
+
+    let header = vec![
+        Line::from(vec![
+            Span::styled(
+                "Log Lens",
+                Style::default()
+                    .fg(palette.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" | project {}", project.name), Style::default().fg(palette.muted)),
+            Span::styled(
+                format!(" | container {}/{}", selected_number, project.containers.len()),
+                Style::default().fg(palette.warning),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Keyword Filter: ", Style::default().fg(palette.muted)),
+            Span::styled(filter.clone(), Style::default().fg(palette.primary)),
+            Span::styled(" | n/p switch container", Style::default().fg(palette.muted)),
+        ]),
+        Line::from(vec![
+            Span::styled("Highlight: ", Style::default().fg(palette.muted)),
+            Span::styled("ERROR", Style::default().fg(palette.danger).add_modifier(Modifier::BOLD)),
+            Span::raw(" / "),
+            Span::styled("WARN", Style::default().fg(palette.warning).add_modifier(Modifier::BOLD)),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(header)
+            .style(Style::default().bg(palette.surface))
+            .block(
+                Block::default()
+                    .title("Signal")
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(palette.primary))
+                    .style(Style::default().bg(palette.surface)),
+            ),
+        chunks[0],
+    );
+
+    let rows = project
+        .containers
+        .iter()
+        .enumerate()
+        .map(|(index, container)| {
+            let selected = index == selected_index;
+            Row::new(vec![
+                Cell::from(if selected { ">" } else { " " }),
+                Cell::from(container.state.state_code()).style(log_state_style(container, palette)),
+                Cell::from(container.name.clone()).style(if selected {
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(palette.selection)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(palette.primary)
+                }),
+                Cell::from(container.status.clone()).style(log_status_style(&container.status, palette)),
+            ])
+            .style(if selected {
+                Style::default().bg(palette.selection)
+            } else {
+                Style::default().bg(palette.surface)
+            })
+        });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(2),
+            Constraint::Length(6),
+            Constraint::Min(18),
+            Constraint::Percentage(45),
+        ],
+    )
+    .header(
+        Row::new(vec![
+            Cell::from(""),
+            Cell::from("State"),
+            Cell::from("Selected Container"),
+            Cell::from("Status / Preview Signal"),
+        ])
+        .style(
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .block(
+        Block::default()
+            .title("Containers")
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(palette.primary))
+            .style(Style::default().bg(palette.surface)),
+    );
+    frame.render_widget(table, chunks[1]);
+
+    frame.render_widget(
+        Paragraph::new(format!(
+            "dockerctl logs {target} --tail 200 | filter: {filter} | highlights: error warn panic"
+        ))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(palette.muted).bg(palette.surface))
+        .block(
+            Block::default()
+                .title("Command / Log Lens")
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(palette.muted))
+                .style(Style::default().bg(palette.surface)),
+        ),
+        chunks[2],
+    );
+}
+
+fn log_filter_label(state: &DashboardState) -> String {
+    if state.filter.is_empty() {
+        "none".to_string()
+    } else {
+        state.filter.clone()
+    }
+}
+
+fn log_state_style(container: &crate::domain::Container, palette: ThemePalette) -> Style {
+    match container.state {
+        crate::domain::ContainerState::Unhealthy
+        | crate::domain::ContainerState::Restarting
+        | crate::domain::ContainerState::Dead => Style::default()
+            .fg(palette.danger)
+            .add_modifier(Modifier::BOLD),
+        crate::domain::ContainerState::Paused => Style::default().fg(palette.warning),
+        crate::domain::ContainerState::Running => Style::default().fg(palette.success),
+        _ => Style::default().fg(palette.muted),
+    }
+}
+
+fn log_status_style(status: &str, palette: ThemePalette) -> Style {
+    let lower = status.to_ascii_lowercase();
+    if lower.contains("error") || lower.contains("panic") || lower.contains("unhealthy") {
+        Style::default()
+            .fg(palette.danger)
+            .add_modifier(Modifier::BOLD)
+    } else if lower.contains("warn") || lower.contains("restart") {
+        Style::default().fg(palette.warning)
+    } else {
+        Style::default().fg(palette.muted)
+    }
+}
+
 fn render_resources_panel(
     frame: &mut ratatui::Frame,
     area: ratatui::layout::Rect,
@@ -1899,13 +1857,44 @@ fn render_resource_summary(
         render_resource_card(frame, cards[3], "IO", "--", "read / write", palette.muted, palette);
         return;
     };
+    let trend = state.resource_trend.as_ref();
+    let cpu_subtitle = trend
+        .map(|trend| format!("trend {:+.1}%", trend.cpu_delta_percent))
+        .unwrap_or_else(|| format!("{} containers", data.summary.containers));
+    let mem_subtitle = trend
+        .map(|trend| format!("trend {}", format_signed_bytes(trend.memory_delta_bytes)))
+        .unwrap_or_else(|| {
+            format!(
+                "{}/{}",
+                format_compact_bytes(data.summary.memory_usage_bytes),
+                format_compact_bytes(data.summary.memory_limit_bytes)
+            )
+        });
+    let net_subtitle = trend
+        .map(|trend| {
+            format!(
+                "trend {} / {}",
+                format_signed_bytes(trend.network_rx_delta_bytes),
+                format_signed_bytes(trend.network_tx_delta_bytes)
+            )
+        })
+        .unwrap_or_else(|| "rx / tx".to_string());
+    let io_subtitle = trend
+        .map(|trend| {
+            format!(
+                "trend {} / {}",
+                format_signed_bytes(trend.block_read_delta_bytes),
+                format_signed_bytes(trend.block_write_delta_bytes)
+            )
+        })
+        .unwrap_or_else(|| "read / write".to_string());
 
     render_resource_card(
         frame,
         cards[0],
         "CPU",
         &format!("{:.1}%", data.summary.cpu_percent),
-        &format!("{} containers", data.summary.containers),
+        &cpu_subtitle,
         resource_cpu_color(data.summary.cpu_percent),
         palette,
     );
@@ -1914,11 +1903,7 @@ fn render_resource_summary(
         cards[1],
         "MEM",
         &format!("{:.1}%", data.summary.memory_percent),
-        &format!(
-            "{}/{}",
-            format_compact_bytes(data.summary.memory_usage_bytes),
-            format_compact_bytes(data.summary.memory_limit_bytes)
-        ),
+        &mem_subtitle,
         resource_memory_color(data.summary.memory_percent),
         palette,
     );
@@ -1931,7 +1916,7 @@ fn render_resource_summary(
             format_compact_bytes(data.summary.network_rx_bytes),
             format_compact_bytes(data.summary.network_tx_bytes)
         ),
-        "rx / tx",
+        &net_subtitle,
         palette.primary,
         palette,
     );
@@ -1944,7 +1929,7 @@ fn render_resource_summary(
             format_compact_bytes(data.summary.block_read_bytes),
             format_compact_bytes(data.summary.block_write_bytes)
         ),
-        "read / write",
+        &io_subtitle,
         if data.summary.error_count > 0 {
             palette.warning
         } else {
@@ -1974,7 +1959,7 @@ fn resource_status_lines(state: &DashboardState, project_name: &str) -> Vec<Line
             } else {
                 Span::styled("live", Style::default().fg(palette.success))
             };
-            let spans = vec![
+            let mut spans = vec![
                 Span::styled(
                     "Resource Monitor",
                     Style::default()
@@ -1986,11 +1971,34 @@ fn resource_status_lines(state: &DashboardState, project_name: &str) -> Vec<Line
                 Span::styled(" | KPI sampled", Style::default().fg(palette.muted)),
                 Span::raw(format!(" | err {}", data.summary.error_count)),
             ];
+            if let Some(trend) = state.resource_trend.as_ref() {
+                spans.push(Span::styled(
+                    format!(" | trend {:+.1}%", trend.cpu_delta_percent),
+                    Style::default().fg(palette.accent),
+                ));
+            }
             let mut lines = vec![Line::from(spans)];
             if let Some(error) = data.rows.iter().find_map(|row| row.error.as_deref()) {
                 lines.push(Line::from(vec![
                     Span::styled("stats error | ", Style::default().fg(palette.danger)),
                     Span::styled(error.to_string(), Style::default().fg(palette.danger)),
+                ]));
+            }
+            if let Some(trend) = state.resource_trend.as_ref() {
+                lines.push(Line::from(vec![
+                    Span::styled("trend | ", Style::default().fg(palette.accent)),
+                    Span::styled(
+                        format!(
+                            "CPU {:+.1}% MEM {} NET {} / {} IO {} / {}",
+                            trend.cpu_delta_percent,
+                            format_signed_bytes(trend.memory_delta_bytes),
+                            format_signed_bytes(trend.network_rx_delta_bytes),
+                            format_signed_bytes(trend.network_tx_delta_bytes),
+                            format_signed_bytes(trend.block_read_delta_bytes),
+                            format_signed_bytes(trend.block_write_delta_bytes)
+                        ),
+                        Style::default().fg(palette.accent),
+                    ),
                 ]));
             }
             lines
@@ -2089,7 +2097,10 @@ fn render_resource_table(
         return;
     }
 
-    let rows = data.rows.iter().map(|row| resource_table_row(row, palette));
+    let sorted_rows = sorted_resource_rows(&data.rows);
+    let rows = sorted_rows
+        .iter()
+        .map(|row| resource_table_row(row, palette));
     let table = Table::new(
         rows,
         [
@@ -2170,9 +2181,14 @@ fn render_resource_footer(
         .and_then(|project| project.containers.first())
         .map(|container| container.id.as_str())
         .unwrap_or("<container>");
+    let hint = state
+        .resource_data
+        .as_ref()
+        .and_then(|data| resource_pressure_hint(&data.rows))
+        .unwrap_or_else(|| "no pressure signal".to_string());
     frame.render_widget(
         Paragraph::new(format!(
-            "r refresh | m resources | stats: dockerctl stats {target} --json"
+            "r refresh | m resources | hotspot: {hint} | stats: dockerctl stats {target} --json"
         ))
         .alignment(Alignment::Center)
         .block(
@@ -2269,7 +2285,7 @@ fn render_context_menu(
             let selected = index == menu.selected_index;
             Line::from(vec![
                 Span::styled(
-                    format!(" {:<8}", item.label()),
+                    format!("{} {:<8}", if selected { ">" } else { " " }, item.label()),
                     context_menu_item_style(*item, selected, palette),
                 ),
                 Span::styled(
@@ -2613,13 +2629,12 @@ fn logs_text(state: &DashboardState) -> String {
          containers: {}\n\
          tail: 200 lines\n\
          filter: {filter}\n\
-         mode: follow-ready, pause-ready\n\n\
+         mode: container-switch + keyword-highlight\n\n\
          controls\n\
          l: open this panel\n\
          /: update shared filter\n\
-         p: pause stream placeholder\n\
-         g: follow latest placeholder\n\
-         y: copy selected line placeholder\n\n\
+         n/p: switch container\n\
+         error/warn: highlighted in output plan\n\n\
          commands\n\
          dockerctl logs {target} --tail 200\n",
         project.name,
@@ -2657,7 +2672,7 @@ fn resources_text(state: &DashboardState) -> String {
          commands\n\
          dockerctl stats {target}\n\
          dockerctl stats {target} --json\n\n\
-         note: v0.2.2 samples only the selected project and feeds Ops Inbox signals.\n",
+         note: v0.3.0 sorts high CPU/high memory/error rows first and feeds Ops Inbox signals.\n",
         project.name,
         project.containers.len(),
         project.active(),
