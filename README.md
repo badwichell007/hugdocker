@@ -7,7 +7,7 @@
 面向 Linux 日常运维的高性能 Docker TUI/CLI。以项目为中心聚合 Compose、Stack 和 standalone 容器，提供资源监控、风险预演、安全执行、异常恢复、审计时间线和脚本化 JSON 输出。
 
 [![CI](https://github.com/badwichell007/hugdocker/actions/workflows/ci.yml/badge.svg)](https://github.com/badwichell007/hugdocker/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/badge/release-v0.4.4-0ea5e9)](https://github.com/badwichell007/hugdocker/releases)
+[![Release](https://img.shields.io/badge/release-v0.5.0-0ea5e9)](https://github.com/badwichell007/hugdocker/releases)
 [![Rust](https://img.shields.io/badge/Rust-2024-f97316)](https://www.rust-lang.org/)
 [![TUI](https://img.shields.io/badge/TUI-ratatui%20%2B%20crossterm-22c55e)](https://ratatui.rs/)
 [![Docker API](https://img.shields.io/badge/Docker%20API-bollard-2563eb)](https://github.com/fussybeaver/bollard)
@@ -120,7 +120,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ### 指定版本
 
 ```bash
-HUGDOCKER_VERSION=v0.4.4 curl -fsSL https://raw.githubusercontent.com/badwichell007/hugdocker/main/scripts/install.sh | bash
+HUGDOCKER_VERSION=v0.5.0 curl -fsSL https://raw.githubusercontent.com/badwichell007/hugdocker/main/scripts/install.sh | bash
 ```
 
 ### 源码安装
@@ -199,6 +199,15 @@ hugdocker restart myapp --yes
 hugdocker doctor
 hugdocker health --json
 hugdocker rescue myapp --dry-run
+```
+
+远程 Docker context：
+
+```bash
+hugdocker context ls
+hugdocker context current
+hugdocker --context staging list
+hugdocker --host tcp://127.0.0.1:2375 doctor
 ```
 
 日志和资源采样：
@@ -495,11 +504,53 @@ hugdocker compose myapp pull --yes
 hugdocker compose myapp up web --yes
 hugdocker compose myapp rebuild api --yes
 hugdocker compose myapp restart --yes
+hugdocker compose myapp watch --yes
+hugdocker compose myapp diff --dry-run
+hugdocker compose myapp rollback api --dry-run
 hugdocker update myapp --dry-run
 hugdocker update myapp --yes
 ```
 
-`compose` 覆盖 `pull/up/down/rebuild/restart` 常用动作；`update` 输出 `pull -> restart plan -> doctor hint`，先复用 Operation Plan 展示影响范围，再执行 restart。
+`compose` 覆盖 `pull/up/down/rebuild/restart/watch/diff/rollback` 常用动作；`diff` 映射到 `docker compose config`，用于查看最终配置；`rollback` 当前是轻量恢复入口，映射到 `up -d --force-recreate`，适合镜像回退后重建指定服务。
+
+`update` 输出 `pull -> restart plan -> doctor hint`，先复用 Operation Plan 展示影响范围，再执行 restart。
+
+### Docker Context 和远程单机
+
+查看 Docker contexts：
+
+```bash
+hugdocker context ls
+hugdocker context ls --json
+hugdocker context current
+```
+
+临时指定远程 context：
+
+```bash
+hugdocker --context staging list
+hugdocker --context staging doctor
+hugdocker --context staging compose myapp pull --dry-run
+```
+
+临时指定 Docker host：
+
+```bash
+hugdocker --host unix:///var/run/docker.sock list
+hugdocker --host tcp://127.0.0.1:2375 health
+```
+
+也可以写入配置文件：
+
+```toml
+[docker]
+context = "staging"
+# host = "tcp://127.0.0.1:2375"
+```
+
+`--host` 优先级高于 `--context`。API 路径使用 Docker Engine endpoint，Compose 路径会把 `--context` 或 `--host` 透传给 Docker CLI，因此 dry-run 输出可以直接复制执行。
+
+### 审计导出
 
 默认状态文件：
 
@@ -507,6 +558,16 @@ hugdocker update myapp --yes
 ~/.local/state/hugdocker/audit.log
 ~/.local/state/hugdocker/timeline.jsonl
 ```
+
+导出最近审计记录：
+
+```bash
+hugdocker audit export
+hugdocker audit export --tail 500
+hugdocker audit export --tail 500 --json
+```
+
+`audit export` 不需要 Docker daemon，适合把本地操作记录接入 `jq`、ELK、备份脚本或故障复盘。
 
 ### Profiles 和 Recipes
 
@@ -534,6 +595,10 @@ hugdocker init-config
 示例：
 
 ```toml
+[docker]
+# context = "default"
+# host = "tcp://127.0.0.1:2375"
+
 [tui]
 refresh_ms = 2000
 log_tail = 200
@@ -566,7 +631,7 @@ allow_yes_for_purge = false
 
 ## 技术架构
 
-`hugdocker` 默认走 Docker Engine API，本地 Docker socket 优先。CLI fallback 只用于兼容场景。
+`hugdocker` 默认走 Docker Engine API，本地 Docker socket 优先；也支持通过 `--context`、`DOCKER_CONTEXT`、`--host`、`DOCKER_HOST` 连接远程单机 Docker endpoint。CLI fallback 只用于 Compose、shell exec 等 Docker API 不适合直接承载的交互场景。
 
 ```mermaid
 flowchart LR
@@ -625,6 +690,7 @@ sequenceDiagram
 性能策略：
 
 - 快照聚合一次读取 containers、networks、volumes、images。
+- Docker context 只在启动或命令入口解析 endpoint，不在 TUI 主循环重复调用 Docker CLI。
 - TUI 主循环采用事件驱动 redraw，避免空闲高频重绘。
 - Resource Monitor 只在资源页采样当前项目，不全局轮询。
 - stats 采样通过后台 one-shot task 执行，避免阻塞按键和鼠标。
@@ -652,6 +718,7 @@ hugdocker health --json
 hugdocker plan <action> <project...> --json
 hugdocker profiles --json
 hugdocker recipes --json
+hugdocker audit export --json
 ```
 
 适用场景：
@@ -661,7 +728,7 @@ hugdocker recipes --json
 | Shell 自动化 | `hugdocker list --json | jq ...` |
 | CI 诊断 | `hugdocker health --json` |
 | 批量预演 | `hugdocker plan restart app1 app2 --json` |
-| 运维审计 | 结合 `audit.log` 和 `timeline.jsonl` |
+| 运维审计 | `hugdocker audit export --tail 500 --json` |
 
 ## 安全模型
 
@@ -700,18 +767,22 @@ OperationAction -> OperationPlan -> Confirmation -> Executor -> Audit
 - Doctor、Health、TUI Doctor 和 Ops Inbox 复用同一套风险指纹模型。
 - 配置路径迁移到 `hugdocker`，同时读取旧 `dockerctl` 配置。
 
-### v0.4.x
+### v0.5.0 已完成
 
-- 扩展 Ops Fingerprint 规则：镜像大小、端口暴露范围、长期 exited 容器、重复挂载和疑似泄漏资源。
-- 让 Recipes 支持用户本地 TOML 配方，并继续复用 OperationPlan 安全执行。
+- 支持 Docker contexts：`hugdocker --context staging list`、`hugdocker context ls/current`。
+- 支持显式 Docker host：`hugdocker --host tcp://127.0.0.1:2375 doctor`，并可写入 `[docker]` 配置。
+- Compose 工作流扩展到 `watch/diff/rollback`，dry-run 输出可直接复制执行。
+- 新增 `audit export`，把本地 JSONL 审计记录变成可脚本化导出入口。
+- Docker API 连接复用 bollard host 解析，减少手写 endpoint 分支，保留本地 socket 默认体验。
+
+### v0.5.x
+
+- 增强 Profiles：支持更丰富的业务域筛选、隐藏规则和 TUI 内 profile 切换。
+- 增强 Recipes：支持用户本地 TOML 配方，并继续复用 OperationPlan 安全执行。
 - 增强 Timeline：把 Docker events、操作审计和健康变化聚合成更可读的事件流。
 - 增强日志面板：TUI 内按容器切换、过滤关键字、高亮 error/warn，并避免日志拉取阻塞 UI。
-- 增强 Exec：右键容器选择器、shell fallback、容器级进入体验。
-- 增强 Compose Ops：把 pull/up/down/rebuild/restart 做成项目级安全入口。
-- 增强 Safe Update Flow：pull、restart plan、health hint 组合成日常更新动作。
-- 研究远程 Docker context 支持，优先保持本地 socket 的安全和低延迟体验。
-- 探索 Podman 兼容层，但不牺牲 Docker-first 的稳定性。
 - 增加可选历史指标文件，用于轻量趋势分析，不默认开启后台采集。
+- 探索 Podman 兼容层，但不牺牲 Docker-first 的稳定性。
 - 加强安装体验：更多发行版预编译包、校验说明、自动补全安装和仓库重命名迁移说明。
 
 ### 长期方向
@@ -722,6 +793,14 @@ OperationAction -> OperationPlan -> Confirmation -> Executor -> Audit
 - 优先做好本地 Docker 运维，不把项目扩张成复杂平台。
 
 ## 更新日志
+
+### v0.5.0
+
+- 新增 Docker context 支持：`--context`、`DOCKER_CONTEXT`、`hugdocker context ls`、`hugdocker context current`。
+- 新增 Docker host 支持：`--host`、`DOCKER_HOST` 和 `[docker] host/context` 配置，适合远程单机 Docker endpoint。
+- Compose 工作流新增 `watch`、`diff`、`rollback`；dry-run 会显示包含 `--context` 或 `--host` 的真实预览命令。
+- 新增 `hugdocker audit export`，支持 `--tail` 和 `--json`，不用连接 Docker daemon 也能导出本地审计。
+- Docker API 连接改为复用 bollard host 解析，减少 endpoint 兼容分支，继续保持本地 socket 默认体验。
 
 ### v0.4.4
 

@@ -13,6 +13,8 @@ const LEGACY_APP_DIR: &str = "dockerctl";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
+    pub docker: DockerConfig,
+    #[serde(default)]
     pub groups: GroupConfig,
     #[serde(default)]
     pub profiles: ProfileConfig,
@@ -25,12 +27,19 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            docker: DockerConfig::default(),
             groups: GroupConfig::default(),
             profiles: ProfileConfig::default(),
             tui: TuiConfig::default(),
             safety: SafetyConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DockerConfig {
+    pub context: Option<String>,
+    pub host: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +162,7 @@ fn load_config_from_paths(primary: Option<PathBuf>, legacy: Option<PathBuf>) -> 
         return AppConfig::default();
     };
     toml::from_str::<AppConfig>(&content).unwrap_or_else(|_| AppConfig {
+        docker: DockerConfig::default(),
         groups: parse_group_config(&content),
         ..AppConfig::default()
     })

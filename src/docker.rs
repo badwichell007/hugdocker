@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Write};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use bollard::Docker;
 use bollard::query_parameters::{
@@ -28,7 +28,7 @@ pub struct DockerClient {
 
 impl DockerClient {
     pub fn connect(config: AppConfig) -> AppResult<Self> {
-        let docker = Docker::connect_with_socket_defaults()?;
+        let docker = connect_docker(&config)?;
         Ok(Self { docker, config })
     }
 
@@ -617,8 +617,24 @@ impl DockerClient {
     }
 }
 
-pub fn docker_compose_project(project: &str, args: &[&str]) -> AppResult<()> {
-    let status = Command::new("docker")
+pub fn docker_compose_project(config: &AppConfig, project: &str, args: &[&str]) -> AppResult<()> {
+    let mut command = Command::new("docker");
+    if let Some(host) = config
+        .docker
+        .host
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        command.args(["--host", host]);
+    } else if let Some(context) = config
+        .docker
+        .context
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        command.args(["--context", context]);
+    }
+    let status = command
         .args(["compose", "-p", project])
         .args(args)
         .status()?;
@@ -627,6 +643,46 @@ pub fn docker_compose_project(project: &str, args: &[&str]) -> AppResult<()> {
     } else {
         msg(format!("docker compose 退出状态: {status}"))
     }
+}
+
+fn connect_docker(config: &AppConfig) -> AppResult<Docker> {
+    if let Some(host) = config
+        .docker
+        .host
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        return Docker::connect_with_host(host).map_err(Into::into);
+    }
+    if let Some(context) = config
+        .docker
+        .context
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        if let Some(host) = docker_context_host(context)? {
+            return Docker::connect_with_host(&host).map_err(Into::into);
+        }
+    }
+    Docker::connect_with_defaults().map_err(Into::into)
+}
+
+fn docker_context_host(context: &str) -> AppResult<Option<String>> {
+    let output = Command::new("docker")
+        .args([
+            "context",
+            "inspect",
+            context,
+            "--format",
+            "{{.Endpoints.docker.Host}}",
+        ])
+        .stderr(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        return msg(format!("无法读取 Docker context: {context}"));
+    }
+    let host = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!host.is_empty()).then_some(host))
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

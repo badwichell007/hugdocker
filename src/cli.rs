@@ -5,7 +5,9 @@ use std::str::FromStr;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 
-use crate::config::{config_path, load_config, timeline_log_path, write_default_config};
+use crate::config::{
+    audit_log_path, config_path, load_config, timeline_log_path, write_default_config,
+};
 use crate::docker::{
     DockerClient, docker_cli_available, docker_compose_project, highlight_log_line,
 };
@@ -25,6 +27,12 @@ use crate::{AppResult, msg};
     about = "Linux 日常 Docker 项目管理 TUI/CLI"
 )]
 pub struct Cli {
+    /// Docker context name，覆盖 DOCKER_CONTEXT
+    #[arg(long, global = true, env = "DOCKER_CONTEXT")]
+    pub context: Option<String>,
+    /// Docker host endpoint，覆盖 DOCKER_HOST
+    #[arg(long, global = true, env = "DOCKER_HOST")]
+    pub host: Option<String>,
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -99,6 +107,11 @@ pub enum Commands {
     Restart(OperationArgs),
     /// 快速恢复异常项目
     Rescue(OperationArgs),
+    /// 查看 Docker contexts
+    Context {
+        #[command(subcommand)]
+        command: ContextCommand,
+    },
     /// Compose 项目日常操作：pull/up/down/rebuild/restart
     Compose {
         project: String,
@@ -126,6 +139,11 @@ pub enum Commands {
         tail: usize,
         #[arg(long)]
         watch: bool,
+    },
+    /// 导出本地审计日志
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommand,
     },
     /// 按 profile/group 展示项目
     Profiles {
@@ -213,6 +231,31 @@ pub enum ComposeActionArg {
     Down,
     Rebuild,
     Restart,
+    Watch,
+    Diff,
+    Rollback,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ContextCommand {
+    /// 列出 Docker contexts
+    Ls {
+        #[arg(long)]
+        json: bool,
+    },
+    /// 显示当前 Docker context
+    Current,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuditCommand {
+    /// 导出 audit.log，默认 JSONL
+    Export {
+        #[arg(long, default_value_t = 200)]
+        tail: usize,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 impl From<ActionArg> for OperationAction {
@@ -248,7 +291,13 @@ impl FromStr for ActionArg {
 
 pub async fn run() -> AppResult<()> {
     let cli = Cli::parse();
-    let config = load_config();
+    let mut config = load_config();
+    if cli.context.is_some() {
+        config.docker.context = cli.context.clone();
+    }
+    if cli.host.is_some() {
+        config.docker.host = cli.host.clone();
+    }
 
     match cli.command.unwrap_or(Commands::Tui) {
         Commands::Tui | Commands::Menu => {
@@ -356,13 +405,14 @@ pub async fn run() -> AppResult<()> {
         Commands::Stop(args) => operation_command(config, OperationAction::Stop, args).await,
         Commands::Restart(args) => operation_command(config, OperationAction::Restart, args).await,
         Commands::Rescue(args) => operation_command(config, OperationAction::Rescue, args).await,
+        Commands::Context { command } => context_command(command),
         Commands::Compose {
             project,
             action,
             service,
             dry_run,
             yes,
-        } => compose_command(project, action, service, dry_run, yes),
+        } => compose_command(&config, project, action, service, dry_run, yes),
         Commands::Update(args) => update_command(config, args).await,
         Commands::Remove(args) => operation_command(config, OperationAction::Remove, args).await,
         Commands::Purge(args) => operation_command(config, OperationAction::Purge, args).await,
@@ -375,6 +425,7 @@ pub async fn run() -> AppResult<()> {
                 timeline_command(tail)
             }
         }
+        Commands::Audit { command } => audit_command(command),
         Commands::Profiles { json } => profiles_command(config, json).await,
         Commands::Recipes { json } => recipes_command(json),
         Commands::Watch {
@@ -446,6 +497,32 @@ fn timeline_command(tail: usize) -> AppResult<()> {
         println!("暂无时间线事件: {}", path.display());
     }
     Ok(())
+}
+
+fn audit_command(command: AuditCommand) -> AppResult<()> {
+    match command {
+        AuditCommand::Export { tail, json } => {
+            let path = audit_log_path().unwrap_or_else(|| PathBuf::from("(unknown)"));
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            let lines = content.lines().rev().take(tail).collect::<Vec<_>>();
+            if json {
+                let rows = lines
+                    .into_iter()
+                    .rev()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .collect::<Vec<_>>();
+                print_json(&rows)
+            } else {
+                for line in lines.into_iter().rev() {
+                    println!("{line}");
+                }
+                if content.is_empty() {
+                    println!("暂无审计日志: {}", path.display());
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 async fn profiles_command(config: crate::config::AppConfig, json: bool) -> AppResult<()> {
@@ -707,6 +784,7 @@ fn action_name(action: OperationAction) -> &'static str {
 }
 
 fn compose_command(
+    config: &crate::config::AppConfig,
     project: String,
     action: ComposeActionArg,
     service: Option<String>,
@@ -714,7 +792,7 @@ fn compose_command(
     yes: bool,
 ) -> AppResult<()> {
     let args = compose_args(action, service.as_deref());
-    println!("docker compose -p {} {}", project, args.join(" "));
+    println!("{}", compose_preview_command(config, &project, &args));
     if dry_run {
         return Ok(());
     }
@@ -722,7 +800,33 @@ fn compose_command(
         println!("Compose 操作需要 --yes 执行。");
         return Ok(());
     }
-    docker_compose_project(&project, &args)
+    docker_compose_project(config, &project, &args)
+}
+
+fn compose_preview_command(
+    config: &crate::config::AppConfig,
+    project: &str,
+    args: &[&str],
+) -> String {
+    let mut parts = vec!["docker".to_string()];
+    if let Some(host) = config
+        .docker
+        .host
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        parts.extend(["--host".to_string(), host.to_string()]);
+    } else if let Some(context) = config
+        .docker
+        .context
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        parts.extend(["--context".to_string(), context.to_string()]);
+    }
+    parts.extend(["compose".to_string(), "-p".to_string(), project.to_string()]);
+    parts.extend(args.iter().map(|arg| (*arg).to_string()));
+    parts.join(" ")
 }
 
 fn compose_args(action: ComposeActionArg, service: Option<&str>) -> Vec<&str> {
@@ -734,6 +838,42 @@ fn compose_args(action: ComposeActionArg, service: Option<&str>) -> Vec<&str> {
             vec!["up", "-d", "--build", svc]
         }),
         ComposeActionArg::Restart => service.map_or(vec!["restart"], |svc| vec!["restart", svc]),
+        ComposeActionArg::Watch => service.map_or(vec!["watch"], |svc| vec!["watch", svc]),
+        ComposeActionArg::Diff => vec!["config"],
+        ComposeActionArg::Rollback => service.map_or(vec!["up", "-d", "--force-recreate"], |svc| {
+            vec!["up", "-d", "--force-recreate", svc]
+        }),
+    }
+}
+
+fn context_command(command: ContextCommand) -> AppResult<()> {
+    match command {
+        ContextCommand::Ls { json } => {
+            let output = docker_output(&["context", "ls", "--format", "{{json .}}"])?;
+            if json {
+                let rows = output
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .collect::<Vec<_>>();
+                print_json(&rows)
+            } else {
+                print!("{output}");
+                Ok(())
+            }
+        }
+        ContextCommand::Current => {
+            print!("{}", docker_output(&["context", "show"])?);
+            Ok(())
+        }
+    }
+}
+
+fn docker_output(args: &[&str]) -> AppResult<String> {
+    let output = std::process::Command::new("docker").args(args).output()?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        msg(String::from_utf8_lossy(&output.stderr).trim().to_string())
     }
 }
 
@@ -755,7 +895,7 @@ async fn update_command(config: crate::config::AppConfig, args: OperationArgs) -
         ConfirmationDecision::Prompt => require_confirmation(&plan)?,
     }
     for project in &plan.projects {
-        let _ = docker_compose_project(project, &["pull"]);
+        let _ = docker_compose_project(client.config(), project, &["pull"]);
     }
     let result = client.execute_plan(&plan, false).await?;
     println!(

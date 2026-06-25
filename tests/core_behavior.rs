@@ -109,6 +109,21 @@ fn config_supports_custom_profile_groups() {
 }
 
 #[test]
+fn config_supports_default_docker_context_or_host() {
+    let config = toml::from_str::<AppConfig>(
+        r#"
+[docker]
+context = "staging"
+host = "tcp://127.0.0.1:2375"
+"#,
+    )
+    .expect("docker endpoint config");
+
+    assert_eq!(config.docker.context.as_deref(), Some("staging"));
+    assert_eq!(config.docker.host.as_deref(), Some("tcp://127.0.0.1:2375"));
+}
+
+#[test]
 fn snapshot_groups_compose_and_standalone_containers_in_one_pass() {
     let snapshot = fixture_snapshot();
 

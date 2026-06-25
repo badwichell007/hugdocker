@@ -11,6 +11,8 @@ fn help_lists_daily_docker_workflow_commands() {
             .and(predicate::str::contains("inbox"))
             .and(predicate::str::contains("compose"))
             .and(predicate::str::contains("update"))
+            .and(predicate::str::contains("context"))
+            .and(predicate::str::contains("audit"))
             .and(predicate::str::contains("safe-prune"))
             .and(predicate::str::contains("completion")),
     );
@@ -34,6 +36,84 @@ fn compose_dry_run_does_not_require_docker_daemon() {
         .assert()
         .success()
         .stdout(predicate::str::contains("docker compose -p shop pull"));
+}
+
+#[test]
+fn compose_workflow_dry_run_supports_diff_and_rollback() {
+    let mut diff = Command::cargo_bin("hugdocker").expect("binary");
+    diff.args(["compose", "shop", "diff", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("docker compose -p shop config"));
+
+    let mut rollback = Command::cargo_bin("hugdocker").expect("binary");
+    rollback
+        .args(["compose", "shop", "rollback", "api", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "docker compose -p shop up -d --force-recreate api",
+        ));
+}
+
+#[test]
+fn global_context_and_host_flags_are_documented() {
+    let mut cmd = Command::cargo_bin("hugdocker").expect("binary");
+
+    cmd.arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--context").and(predicate::str::contains("--host")));
+}
+
+#[test]
+fn compose_dry_run_includes_selected_remote_endpoint() {
+    let mut context = Command::cargo_bin("hugdocker").expect("binary");
+    context
+        .args([
+            "--context",
+            "staging",
+            "compose",
+            "shop",
+            "pull",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "docker --context staging compose -p shop pull",
+        ));
+
+    let mut host = Command::cargo_bin("hugdocker").expect("binary");
+    host.args([
+        "--context",
+        "staging",
+        "--host",
+        "tcp://127.0.0.1:2375",
+        "compose",
+        "shop",
+        "diff",
+        "--dry-run",
+    ])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(
+        "docker --host tcp://127.0.0.1:2375 compose -p shop config",
+    ));
+}
+
+#[test]
+fn audit_export_empty_state_does_not_need_docker_daemon() {
+    let temp = std::env::temp_dir().join(format!("hugdocker-audit-test-{}", std::process::id()));
+    let mut cmd = Command::cargo_bin("hugdocker").expect("binary");
+
+    cmd.env("XDG_STATE_HOME", &temp)
+        .args(["audit", "export"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("暂无审计日志"));
+
+    let _ = std::fs::remove_dir_all(temp);
 }
 
 #[test]

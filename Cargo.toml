@@ -1,6 +1,6 @@
 [package]
 name = "hugdocker"
-version = "0.4.4"
+version = "0.5.0"
 edition = "2024"
 description = "Fast project-first Docker TUI/CLI for Linux daily operations"
 license = "MIT"
@@ -20,7 +20,7 @@ name = "dockerctl"
 path = "src/dockerctl.rs"
 
 [dependencies]
-bollard = "0.20"
+bollard = { version = "0.20", features = ["ssh"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 clap_complete = "4.5"
 crossterm = "0.28"
