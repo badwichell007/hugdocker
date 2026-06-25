@@ -38,6 +38,7 @@ use crate::{AppResult, msg};
 const HEADER_ROWS: u16 = 3;
 const METRIC_ROWS: u16 = 5;
 const FOOTER_ROWS: u16 = 3;
+const BOTTOM_PANEL_ROWS: u16 = 18;
 const PROJECT_HEADER_ROWS: u16 = 2;
 const CONTEXT_MENU_WIDTH: u16 = 36;
 const MIN_TUI_WIDTH: u16 = 90;
@@ -686,6 +687,9 @@ impl TuiApp {
         self.log_container_index = state.log_container_index;
         self.exec_container_index = state.exec_container_index;
         self.list_state.select(state.table_state.selected());
+        if matches!(action, MouseAction::ProjectRowClick { .. }) {
+            self.invalidate_project_panels();
+        }
         Ok(true)
     }
 
@@ -712,10 +716,12 @@ impl TuiApp {
             KeyCode::Char('j') | KeyCode::Down => {
                 self.context_menu = None;
                 self.next();
+                self.invalidate_project_panels();
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.context_menu = None;
                 self.previous();
+                self.invalidate_project_panels();
             }
             KeyCode::Char(' ') => {
                 self.context_menu = None;
@@ -1130,6 +1136,12 @@ impl TuiApp {
         self.log_refresh_key = None;
     }
 
+    fn invalidate_project_panels(&mut self) {
+        self.log_data = None;
+        self.log_refresh_key = None;
+        self.last_resource_refresh = None;
+    }
+
     fn dashboard_state(&self) -> DashboardState {
         let mut state = DashboardState {
             snapshot: self.snapshot.clone(),
@@ -1276,7 +1288,7 @@ impl TuiApp {
     }
 
     fn ensure_resource_sampling(&mut self) -> bool {
-        if self.panel != TuiPanel::Resources {
+        if !dashboard_shows_resource_panel(self.panel) {
             if let Some(task) = self.resource_task.take() {
                 task.abort();
                 return true;
@@ -1346,30 +1358,41 @@ pub fn render_dashboard(frame: &mut ratatui::Frame, state: &mut DashboardState) 
         return;
     }
 
+    if area.height < 30 {
+        let outer = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(HEADER_ROWS),
+                Constraint::Length(METRIC_ROWS),
+                Constraint::Min(8),
+                Constraint::Length(FOOTER_ROWS),
+            ])
+            .split(area);
+        render_header(frame, outer[0], state);
+        render_metric_bar(frame, outer[1], state);
+        render_projects_table(frame, outer[2], state);
+        render_command_bar(frame, outer[3], state);
+        render_context_menu(frame, area, state);
+        render_exec_picker(frame, area, state);
+        return;
+    }
+
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Length(5),
-            Constraint::Min(10),
-            Constraint::Length(3),
+            Constraint::Length(HEADER_ROWS),
+            Constraint::Length(METRIC_ROWS),
+            Constraint::Min(8),
+            Constraint::Length(BOTTOM_PANEL_ROWS),
+            Constraint::Length(FOOTER_ROWS),
         ])
         .split(area);
 
     render_header(frame, outer[0], state);
     render_metric_bar(frame, outer[1], state);
-
-    let left_width = if area.width < 110 { 42 } else { 48 };
-    let main = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(left_width),
-            Constraint::Percentage(100 - left_width),
-        ])
-        .split(outer[2]);
-    render_projects_table(frame, main[0], state);
-    render_ops_deck(frame, main[1], state);
-    render_command_bar(frame, outer[3], state);
+    render_projects_table(frame, outer[2], state);
+    render_cockpit_bottom(frame, outer[3], state);
+    render_command_bar(frame, outer[4], state);
     render_context_menu(frame, area, state);
     render_exec_picker(frame, area, state);
 }
@@ -1423,13 +1446,7 @@ fn render_header(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state:
     let live_badge = Span::styled(" LIVE docker socket ", Style::default().fg(palette.muted));
     let title = Line::from(vec![
         Span::styled(
-            " OPS COCKPIT ",
-            Style::default()
-                .fg(palette.primary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            " HUGDOCKER COMMAND CENTER",
+            " HUGDOCKER COMMAND CENTER // OPS COCKPIT ",
             Style::default()
                 .fg(palette.primary)
                 .add_modifier(Modifier::BOLD),
@@ -1446,6 +1463,7 @@ fn render_header(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state:
             ),
             Style::default().fg(palette.warning),
         ),
+        Span::styled(" | connected", Style::default().fg(palette.success)),
     ]);
     frame.render_widget(
         Paragraph::new(title)
@@ -1590,12 +1608,15 @@ fn render_projects_table(
     let palette = theme_palette(state.theme);
     let header = Row::new(vec![
         Cell::from("Sel"),
-        Cell::from("State"),
+        Cell::from("Risk"),
         Cell::from("Project"),
+        Cell::from("State"),
         Cell::from("Kind"),
         Cell::from("Run"),
         Cell::from("Ports"),
-        Cell::from("Risk"),
+        Cell::from("Images"),
+        Cell::from("CPU"),
+        Cell::from("MEM"),
     ])
     .style(
         Style::default()
@@ -1607,6 +1628,7 @@ fn render_projects_table(
         let is_selected = state.selected.contains(&project.name);
         let selected = if is_selected { "[x]" } else { "[ ]" };
         let risk = project_risk(project, palette);
+        let resource = project_resource_cells(state, project);
         let selection_style = selected_project_style(palette);
         let row_style = if is_selected {
             Style::default().bg(palette.selection)
@@ -1619,17 +1641,20 @@ fn render_projects_table(
             } else {
                 Style::default().fg(palette.muted)
             }),
-            Cell::from(status_pill(project)).style(project_style(project, palette)),
+            Cell::from(risk.0).style(Style::default().fg(risk.1).add_modifier(Modifier::BOLD)),
             Cell::from(project.name.clone()).style(if is_selected {
                 selection_style
             } else {
                 Style::default().fg(Color::White)
             }),
+            Cell::from(status_pill(project)).style(project_style(project, palette)),
             Cell::from(project_kind_label(project)).style(Style::default().fg(palette.muted)),
             Cell::from(format!("{}/{}", project.active(), project.containers.len()))
                 .style(Style::default().fg(palette.accent)),
             Cell::from(project.ports.len().to_string()).style(Style::default().fg(palette.muted)),
-            Cell::from(risk.0).style(Style::default().fg(risk.1).add_modifier(Modifier::BOLD)),
+            Cell::from(project.images.len().to_string()).style(Style::default().fg(palette.muted)),
+            Cell::from(resource.0).style(Style::default().fg(resource.2)),
+            Cell::from(resource.1).style(Style::default().fg(resource.3)),
         ])
         .style(row_style)
     });
@@ -1639,17 +1664,20 @@ fn render_projects_table(
         [
             Constraint::Length(5),
             Constraint::Length(7),
-            Constraint::Min(14),
+            Constraint::Min(18),
+            Constraint::Length(7),
             Constraint::Length(10),
             Constraint::Length(7),
             Constraint::Length(7),
             Constraint::Length(8),
+            Constraint::Length(7),
+            Constraint::Length(7),
         ],
     )
     .header(header)
     .block(
         Block::default()
-            .title("Projects / Risk Radar")
+            .title(project_table_title(state))
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(palette.primary))
@@ -1664,6 +1692,76 @@ fn render_projects_table(
     .highlight_symbol(">> ");
 
     frame.render_stateful_widget(table, area, &mut state.table_state);
+}
+
+fn project_table_title(state: &DashboardState) -> String {
+    let target = state
+        .current_project()
+        .map(|project| project.name.as_str())
+        .unwrap_or("none");
+    let resource = match state.resource_data.as_ref() {
+        Some(data) if data.loading => "sampling",
+        Some(data) if data.stale => "refreshing",
+        Some(_) => "live",
+        None => "waiting",
+    };
+    format!("PROJECT RISK OVERVIEW | target:{target} | resources:{resource}")
+}
+
+fn project_resource_cells(
+    state: &DashboardState,
+    project: &Project,
+) -> (String, String, Color, Color) {
+    let palette = theme_palette(state.theme);
+    let Some(data) = state
+        .resource_data
+        .as_ref()
+        .filter(|data| !data.loading && data.project == project.name)
+    else {
+        return (
+            "--".to_string(),
+            "--".to_string(),
+            palette.muted,
+            palette.muted,
+        );
+    };
+    (
+        format!("{:.1}%", data.summary.cpu_percent),
+        format!("{:.1}%", data.summary.memory_percent),
+        resource_cpu_color(data.summary.cpu_percent),
+        resource_memory_color(data.summary.memory_percent),
+    )
+}
+
+fn render_cockpit_bottom(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    state: &DashboardState,
+) {
+    if !matches!(
+        state.panel,
+        TuiPanel::Inbox | TuiPanel::Logs | TuiPanel::Resources
+    ) {
+        render_ops_deck(frame, area, state);
+        return;
+    }
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(56), Constraint::Percentage(44)])
+        .split(area);
+    match state.panel {
+        TuiPanel::Logs => render_logs_panel(frame, panes[0], state),
+        TuiPanel::Resources => render_logs_panel(frame, panes[0], state),
+        _ => render_ops_deck(frame, panes[0], state),
+    }
+    render_resources_panel(frame, panes[1], state);
+}
+
+fn dashboard_shows_resource_panel(panel: TuiPanel) -> bool {
+    matches!(
+        panel,
+        TuiPanel::Inbox | TuiPanel::Logs | TuiPanel::Resources
+    )
 }
 
 fn status_pill(project: &Project) -> String {
@@ -1771,6 +1869,10 @@ fn render_inbox_panel(
         .iter()
         .filter(|item| item.severity == InboxSeverity::Warning)
         .count();
+    if area.height < 18 || area.width < 90 {
+        render_inbox_panel_compact(frame, area, state, critical, warnings);
+        return;
+    }
     let categories = inbox_categories(&inbox.items);
     let block = Block::default()
         .title("Ops Deck / Ops Inbox")
@@ -1884,6 +1986,69 @@ fn render_inbox_panel(
     );
 }
 
+fn render_inbox_panel_compact(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    state: &DashboardState,
+    critical: usize,
+    warnings: usize,
+) {
+    let palette = theme_palette(state.theme);
+    let inbox = build_ops_inbox(&state.snapshot, state.resource_data.as_ref());
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                "Ops Inbox",
+                Style::default()
+                    .fg(palette.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" | Critical:{critical} Warning:{warnings}"),
+                Style::default().fg(palette.muted),
+            ),
+            Span::styled(" | Next Action", Style::default().fg(palette.warning)),
+        ]),
+        Line::from(Span::styled(
+            "Prioritized next actions from live fleet signals.",
+            Style::default().fg(palette.muted),
+        )),
+    ];
+    for item in inbox
+        .items
+        .iter()
+        .take(area.height.saturating_sub(5) as usize)
+    {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("[{}] ", inbox_severity_label(item.severity)),
+                Style::default().fg(inbox_severity_color(item.severity, palette)),
+            ),
+            Span::styled(item.category.clone(), Style::default().fg(palette.accent)),
+            Span::raw(" | "),
+            Span::styled(item.title.clone(), Style::default().fg(Color::White)),
+        ]));
+        lines.push(Line::from(Span::styled(
+            item.command.clone(),
+            Style::default().fg(palette.warning),
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .style(Style::default().bg(palette.surface))
+            .block(
+                Block::default()
+                    .title("Ops Deck / Ops Inbox")
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(palette.accent))
+                    .style(Style::default().bg(palette.surface)),
+            ),
+        area,
+    );
+}
+
 fn inbox_categories(items: &[InboxItem]) -> String {
     let mut categories = BTreeSet::new();
     for item in items {
@@ -1934,6 +2099,10 @@ fn render_logs_panel(
     state: &DashboardState,
 ) {
     let palette = theme_palette(state.theme);
+    if area.height < 18 || area.width < 70 {
+        render_logs_panel_compact(frame, area, state);
+        return;
+    }
     let block = Block::default()
         .title("Ops Deck / Logs / Log Lens")
         .borders(Borders::ALL)
@@ -2117,6 +2286,143 @@ fn render_logs_panel(
     );
 }
 
+fn render_logs_panel_compact(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    state: &DashboardState,
+) {
+    let palette = theme_palette(state.theme);
+    let Some(project) = state.current_project() else {
+        frame.render_widget(
+            Paragraph::new("Log Lens\nNo project matches current filter.")
+                .style(Style::default().fg(palette.muted).bg(palette.surface))
+                .block(
+                    Block::default()
+                        .title("Ops Deck / Logs / Log Lens")
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(palette.accent))
+                        .style(Style::default().bg(palette.surface)),
+                ),
+            area,
+        );
+        return;
+    };
+    let selected_index = state
+        .log_container_index
+        .min(project.containers.len().saturating_sub(1));
+    let selected_container = project.containers.get(selected_index);
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                "Log Lens",
+                Style::default()
+                    .fg(palette.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" | project {}", project.name),
+                Style::default().fg(palette.muted),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Keyword Filter: ", Style::default().fg(palette.muted)),
+            Span::styled(
+                log_filter_label(state),
+                Style::default().fg(palette.primary),
+            ),
+            Span::styled(
+                " | n/p switch container",
+                Style::default().fg(palette.muted),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Selected Container: ", Style::default().fg(palette.muted)),
+            Span::styled(
+                selected_container
+                    .map(|container| container.name.as_str())
+                    .unwrap_or("none"),
+                Style::default().fg(palette.warning),
+            ),
+            Span::styled(" | Tail Logs", Style::default().fg(palette.muted)),
+        ]),
+        Line::from(vec![
+            Span::styled("Highlight: ", Style::default().fg(palette.muted)),
+            Span::styled(
+                "ERROR",
+                Style::default()
+                    .fg(palette.danger)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" / "),
+            Span::styled(
+                "WARN",
+                Style::default()
+                    .fg(palette.warning)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+    ];
+    lines.extend(compact_log_lines(state, selected_container, palette, 5));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .style(Style::default().bg(palette.surface))
+            .block(
+                Block::default()
+                    .title("Ops Deck / Logs / Log Lens")
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(palette.accent))
+                    .style(Style::default().bg(palette.surface)),
+            ),
+        area,
+    );
+}
+
+fn compact_log_lines(
+    state: &DashboardState,
+    selected_container: Option<&crate::domain::Container>,
+    palette: ThemePalette,
+    limit: usize,
+) -> Vec<Line<'static>> {
+    match (selected_container, state.log_data.as_ref()) {
+        (None, _) => vec![Line::from(Span::styled(
+            "No container in current project.",
+            Style::default().fg(palette.muted),
+        ))],
+        (Some(container), Some(data)) if data.container_id == container.id && data.loading => {
+            vec![Line::from(Span::styled(
+                "Loading logs...",
+                Style::default().fg(palette.warning),
+            ))]
+        }
+        (Some(container), Some(data)) if data.container_id == container.id => {
+            if let Some(error) = data.error.as_ref() {
+                return vec![Line::from(Span::styled(
+                    format!("logs error: {error}"),
+                    Style::default().fg(palette.danger),
+                ))];
+            }
+            if data.lines.is_empty() {
+                return vec![Line::from(Span::styled(
+                    "No log lines matched current filter.",
+                    Style::default().fg(palette.muted),
+                ))];
+            }
+            data.lines
+                .iter()
+                .take(limit)
+                .flat_map(|line| log_line_spans(line, palette))
+                .collect()
+        }
+        _ => vec![Line::from(Span::styled(
+            "Loading logs...",
+            Style::default().fg(palette.warning),
+        ))],
+    }
+}
+
 fn render_log_lines(
     frame: &mut ratatui::Frame,
     area: ratatui::layout::Rect,
@@ -2234,6 +2540,10 @@ fn render_resources_panel(
     state: &DashboardState,
 ) {
     let palette = theme_palette(state.theme);
+    if area.height < 18 || area.width < 70 {
+        render_resources_panel_compact(frame, area, state);
+        return;
+    }
     let block = Block::default()
         .title("Ops Deck / Resources / Resource Monitor")
         .borders(Borders::ALL)
@@ -2255,6 +2565,151 @@ fn render_resources_panel(
     render_resource_summary(frame, chunks[0], state);
     render_resource_table(frame, chunks[1], state);
     render_resource_footer(frame, chunks[2], state);
+}
+
+fn render_resources_panel_compact(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    state: &DashboardState,
+) {
+    let palette = theme_palette(state.theme);
+    let project_name = state
+        .current_project()
+        .map(|project| project.name.as_str())
+        .unwrap_or("none");
+    let hint = state
+        .resource_data
+        .as_ref()
+        .and_then(|data| resource_pressure_hint(&data.rows))
+        .unwrap_or_else(|| "no pressure signal".to_string());
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            "Resource Monitor",
+            Style::default()
+                .fg(palette.primary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" | project {project_name} | hotspot: {hint}"),
+            Style::default().fg(palette.muted),
+        ),
+    ])];
+
+    match state.resource_data.as_ref() {
+        Some(data) if data.loading => {
+            lines.push(Line::from(Span::styled(
+                format!("sampling {project_name}..."),
+                Style::default().fg(palette.warning),
+            )));
+            lines.push(Line::from("CPU -- | MEM -- | NET -- | IO --"));
+        }
+        Some(data) => {
+            let sample = if data.stale { "refreshing" } else { "live" };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    sample,
+                    Style::default().fg(if data.stale {
+                        palette.warning
+                    } else {
+                        palette.success
+                    }),
+                ),
+                Span::styled(
+                    format!(" | err {} | Container rows", data.summary.error_count),
+                    Style::default().fg(palette.muted),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("CPU {:.1}% ", data.summary.cpu_percent),
+                    Style::default().fg(resource_cpu_color(data.summary.cpu_percent)),
+                ),
+                Span::styled(
+                    format!("MEM {:.1}% ", data.summary.memory_percent),
+                    Style::default().fg(resource_memory_color(data.summary.memory_percent)),
+                ),
+                Span::styled("NET rx/tx ", Style::default().fg(palette.primary)),
+                Span::styled("IO r/w", Style::default().fg(palette.primary)),
+            ]));
+            if let Some(trend) = state.resource_trend.as_ref() {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "trend {:+.1}% MEM {}",
+                        trend.cpu_delta_percent,
+                        format_signed_bytes(trend.memory_delta_bytes)
+                    ),
+                    Style::default().fg(palette.accent),
+                )));
+            }
+            if data.rows.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "No active containers in current project.",
+                    Style::default().fg(palette.muted),
+                )));
+            }
+            for row in sorted_resource_rows(&data.rows).into_iter().take(4) {
+                if let Some(error) = row.error {
+                    lines.push(Line::from(Span::styled(
+                        format!("{} | ERR | {error}", row.container_name),
+                        Style::default().fg(palette.danger),
+                    )));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            row.container_name,
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!(" CPU {:.1}%", row.cpu_percent),
+                            Style::default().fg(resource_cpu_color(row.cpu_percent)),
+                        ),
+                        Span::styled(
+                            format!(" MEM {:.1}%", row.memory_percent),
+                            Style::default().fg(resource_memory_color(row.memory_percent)),
+                        ),
+                    ]));
+                }
+            }
+        }
+        None => {
+            lines.push(Line::from(Span::styled(
+                "waiting for first sample | auto-sampling selected project",
+                Style::default().fg(palette.muted),
+            )));
+            lines.push(Line::from(vec![
+                Span::styled("CPU -- ", Style::default().fg(palette.muted)),
+                Span::styled("MEM -- ", Style::default().fg(palette.muted)),
+                Span::styled("NET -- ", Style::default().fg(palette.muted)),
+                Span::styled("IO --", Style::default().fg(palette.muted)),
+            ]));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .style(Style::default().bg(palette.surface))
+            .block(
+                Block::default()
+                    .title(resource_panel_title(state))
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(palette.accent))
+                    .style(Style::default().bg(palette.surface)),
+            ),
+        area,
+    );
+}
+
+fn resource_panel_title(state: &DashboardState) -> String {
+    let sample = match state.resource_data.as_ref() {
+        Some(data) if data.loading => "sampling",
+        Some(data) if data.stale => "refreshing",
+        Some(_) => "live",
+        None => "waiting",
+    };
+    format!("Ops Deck / Resources / Resource Monitor / {sample}")
 }
 
 fn render_resource_summary(
@@ -2930,14 +3385,9 @@ pub fn mouse_action_for_event(
 }
 
 fn is_in_main_area(mouse: MouseEvent, terminal_size: (u16, u16)) -> bool {
-    let (_, rows) = terminal_size;
-    if rows <= HEADER_ROWS + METRIC_ROWS + FOOTER_ROWS {
-        return false;
-    }
-    let main_y = HEADER_ROWS + METRIC_ROWS;
-    let main_height = rows.saturating_sub(HEADER_ROWS + METRIC_ROWS + FOOTER_ROWS);
-    let main_bottom = main_y + main_height;
-    mouse.row >= main_y && mouse.row < main_bottom
+    project_table_area(terminal_size)
+        .map(|area| mouse.row >= area.y && mouse.row < area.y + area.height)
+        .unwrap_or(false)
 }
 
 fn project_row_for_mouse(
@@ -2945,24 +3395,28 @@ fn project_row_for_mouse(
     terminal_size: (u16, u16),
     visible_projects: usize,
 ) -> Option<usize> {
+    let area = project_table_area(terminal_size)?;
+    if mouse.column < area.x
+        || mouse.column >= area.x + area.width
+        || mouse.row < area.y
+        || mouse.row >= area.y + area.height
+    {
+        return None;
+    }
+
+    let row = mouse.row.saturating_sub(area.y + PROJECT_HEADER_ROWS) as usize;
+    (row < visible_projects).then_some(row)
+}
+
+fn project_table_area(terminal_size: (u16, u16)) -> Option<Rect> {
     let (cols, rows) = terminal_size;
     if rows <= HEADER_ROWS + METRIC_ROWS + FOOTER_ROWS {
         return None;
     }
-    let main_y = HEADER_ROWS + METRIC_ROWS;
-    let main_height = rows.saturating_sub(HEADER_ROWS + METRIC_ROWS + FOOTER_ROWS);
-    let main_bottom = main_y + main_height;
-    if mouse.row < main_y || mouse.row >= main_bottom {
-        return None;
-    }
-
-    let left_width = ((cols as u32 * 48) / 100).max(1) as u16;
-    if mouse.column >= left_width {
-        return None;
-    }
-
-    let row = mouse.row.saturating_sub(main_y + PROJECT_HEADER_ROWS) as usize;
-    (row < visible_projects).then_some(row)
+    let bottom_rows = if rows >= 30 { BOTTOM_PANEL_ROWS } else { 0 };
+    let y = HEADER_ROWS + METRIC_ROWS;
+    let height = rows.saturating_sub(HEADER_ROWS + METRIC_ROWS + FOOTER_ROWS + bottom_rows);
+    (height > PROJECT_HEADER_ROWS).then_some(Rect::new(0, y, cols, height))
 }
 
 fn context_menu_rect(area: Rect, menu: &ContextMenuState) -> Rect {
@@ -3177,10 +3631,13 @@ fn detail_text(state: &DashboardState) -> String {
         return "No project matches current filter.".to_string();
     };
     let mut text = format!(
-        "{}\nkind: {:?}\nstate: {}\ncontainers: {} active:{} stopped:{}\nnetworks: {}\nvolumes: {}\nimages: {}\nports: {}\n\n",
+        "{}\nstate: {} | signals: unhealthy={} restarting={} paused={}\nkind: {:?}\ncontainers: {} active:{} stopped:{}\nnetworks: {}\nvolumes: {}\nimages: {}\nports: {}\n\n",
         project.name,
-        project.kind,
         project.state_code(),
+        project.unhealthy,
+        project.restarting,
+        project.paused,
+        project.kind,
         project.containers.len(),
         project.active(),
         project.stopped,
@@ -3331,6 +3788,11 @@ fn command_palette_text(state: &DashboardState) -> String {
         "Command Palette",
         "",
         &format!("target project: {}", project.name),
+        &format!("quick update: hugdocker update {} --dry-run", project.name),
+        &format!(
+            "quick compose: hugdocker compose {} pull --dry-run",
+            project.name
+        ),
         "",
         "Fast actions",
         "  e                open exec container picker",
@@ -3397,7 +3859,15 @@ fn project_risk(project: &Project, palette: ThemePalette) -> (&'static str, Colo
 }
 
 fn format_plan(plan: OperationPlan, prompt: Option<&ExecutionPrompt>) -> String {
-    let mut text = format!("{}\n\n项目: {}\n", plan.summary, plan.projects.join(", "));
+    let mut text = format!("{}\n", plan.summary);
+    text.push_str(&format_execution_prompt(&plan, prompt));
+    if is_destructive_action(plan.action) {
+        text.push_str(&format_safety_rail(&plan));
+    }
+    if plan.action == OperationAction::Rescue {
+        text.push_str(&format_rescue_playbook(&plan));
+    }
+    let mut text = format!("{text}\n项目: {}\n", plan.projects.join(", "));
     if !plan.containers.is_empty() {
         text.push_str(&format!("容器: {}\n", plan.containers.join(", ")));
     }
@@ -3410,19 +3880,12 @@ fn format_plan(plan: OperationPlan, prompt: Option<&ExecutionPrompt>) -> String 
     if !plan.images.is_empty() {
         text.push_str(&format!("镜像: {}\n", plan.images.join(", ")));
     }
-    for warning in &plan.warnings {
-        text.push_str(&format!("警告: {warning}\n"));
-    }
-    if plan.action == OperationAction::Rescue {
-        text.push_str(&format_rescue_playbook(&plan));
-    }
     if let Some(token) = &plan.confirmation_token {
         text.push_str(&format!("\nCLI 执行需确认令牌: {token}\n"));
     }
-    if is_destructive_action(plan.action) {
-        text.push_str(&format_safety_rail(&plan));
+    for warning in &plan.warnings {
+        text.push_str(&format!("警告: {warning}\n"));
     }
-    text.push_str(&format_execution_prompt(&plan, prompt));
     text
 }
 
