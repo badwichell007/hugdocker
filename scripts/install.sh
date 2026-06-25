@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${DOCKERCTL_REPO:-badwichell007/dockerctl}"
-BIN_NAME="dockerctl"
-DEST_DIR="${DOCKERCTL_INSTALL_DIR:-${XDG_BIN_HOME:-$HOME/.local/bin}}"
-VERSION="${DOCKERCTL_VERSION:-latest}"
+REPO="${HUGDOCKER_REPO:-${DOCKERCTL_REPO:-badwichell007/dockerctl}}"
+BIN_NAME="hugdocker"
+DEST_DIR="${HUGDOCKER_INSTALL_DIR:-${DOCKERCTL_INSTALL_DIR:-${XDG_BIN_HOME:-$HOME/.local/bin}}}"
+VERSION="${HUGDOCKER_VERSION:-${DOCKERCTL_VERSION:-latest}}"
 TMP_DIR="$(mktemp -d)"
 
 cleanup() {
@@ -67,6 +67,7 @@ install_binary() {
   local src="$1"
   mkdir -p "${DEST_DIR}"
   install -m 755 "${src}" "${DEST_DIR}/${BIN_NAME}"
+  ln -sf "${BIN_NAME}" "${DEST_DIR}/dockerctl"
 }
 
 main() {
@@ -75,6 +76,7 @@ main() {
   fi
 
   echo "安装完成: ${DEST_DIR}/${BIN_NAME}"
+  echo "兼容别名: ${DEST_DIR}/dockerctl"
   if [[ ":${PATH}:" != *":${DEST_DIR}:"* ]]; then
     echo
     echo "注意: ${DEST_DIR} 不在 PATH。请追加："

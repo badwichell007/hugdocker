@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST_DIR="${1:-${XDG_BIN_HOME:-$HOME/.local/bin}}"
-BIN_NAME="dockerctl"
+BIN_NAME="hugdocker"
 SRC_BIN="${PROJECT_DIR}/target/release/${BIN_NAME}"
 DST_BIN="${DEST_DIR}/${BIN_NAME}"
 
@@ -14,8 +14,10 @@ fi
 
 mkdir -p "${DEST_DIR}"
 install -m 755 "${SRC_BIN}" "${DST_BIN}"
+ln -sf "${BIN_NAME}" "${DEST_DIR}/dockerctl"
 
 echo "安装完成: ${DST_BIN}"
+echo "兼容别名: ${DEST_DIR}/dockerctl"
 echo "现在可以直接执行: ${BIN_NAME}"
 echo
 echo "常用命令:"

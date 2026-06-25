@@ -2,10 +2,10 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN_PATH="$(command -v dockerctl || true)"
+BIN_PATH="$(command -v hugdocker || command -v dockerctl || true)"
 
 if [[ -z "${BIN_PATH}" ]]; then
-  BIN_PATH="${PROJECT_DIR}/target/release/dockerctl"
+  BIN_PATH="${PROJECT_DIR}/target/release/hugdocker"
 fi
 
 if [[ ! -x "${BIN_PATH}" ]]; then

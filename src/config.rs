@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppResult;
 
+const APP_DIR: &str = "hugdocker";
+const LEGACY_APP_DIR: &str = "dockerctl";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -101,16 +104,33 @@ impl Default for SafetyConfig {
 
 pub fn config_path() -> Option<PathBuf> {
     if let Some(base) = env::var_os("XDG_CONFIG_HOME") {
-        return Some(PathBuf::from(base).join("dockerctl/config.toml"));
+        return Some(PathBuf::from(base).join(APP_DIR).join("config.toml"));
     }
-    env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/dockerctl/config.toml"))
+    env::var_os("HOME").map(|home| {
+        PathBuf::from(home)
+            .join(".config")
+            .join(APP_DIR)
+            .join("config.toml")
+    })
+}
+
+fn legacy_config_path() -> Option<PathBuf> {
+    if let Some(base) = env::var_os("XDG_CONFIG_HOME") {
+        return Some(PathBuf::from(base).join(LEGACY_APP_DIR).join("config.toml"));
+    }
+    env::var_os("HOME").map(|home| {
+        PathBuf::from(home)
+            .join(".config")
+            .join(LEGACY_APP_DIR)
+            .join("config.toml")
+    })
 }
 
 pub fn state_dir_path() -> Option<PathBuf> {
     if let Some(base) = env::var_os("XDG_STATE_HOME") {
-        return Some(PathBuf::from(base).join("dockerctl"));
+        return Some(PathBuf::from(base).join(APP_DIR));
     }
-    env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state/dockerctl"))
+    env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state").join(APP_DIR))
 }
 
 pub fn audit_log_path() -> Option<PathBuf> {
@@ -122,10 +142,14 @@ pub fn timeline_log_path() -> Option<PathBuf> {
 }
 
 pub fn load_config() -> AppConfig {
-    let Some(path) = config_path() else {
-        return AppConfig::default();
-    };
-    let Ok(content) = fs::read_to_string(path) else {
+    load_config_from_paths(config_path(), legacy_config_path())
+}
+
+fn load_config_from_paths(primary: Option<PathBuf>, legacy: Option<PathBuf>) -> AppConfig {
+    let content = primary
+        .and_then(|path| fs::read_to_string(path).ok())
+        .or_else(|| legacy.and_then(|path| fs::read_to_string(path).ok()));
+    let Some(content) = content else {
         return AppConfig::default();
     };
     toml::from_str::<AppConfig>(&content).unwrap_or_else(|_| AppConfig {
@@ -204,4 +228,46 @@ pub fn parse_config_atom(raw: &str) -> String {
         value = value[1..value.len() - 1].to_string();
     }
     value.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_path(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        env::temp_dir().join(format!("hugdocker-config-test-{name}-{nonce}"))
+    }
+
+    #[test]
+    fn load_config_falls_back_to_legacy_dockerctl_path() {
+        let legacy = temp_path("legacy").join("config.toml");
+        fs::create_dir_all(legacy.parent().expect("parent")).expect("legacy dir");
+        fs::write(&legacy, "[tui]\ntheme = \"signal\"\n").expect("legacy config");
+
+        let config = load_config_from_paths(Some(temp_path("missing")), Some(legacy.clone()));
+
+        assert_eq!(config.tui.theme, "signal");
+        let _ = fs::remove_dir_all(legacy.parent().expect("parent"));
+    }
+
+    #[test]
+    fn load_config_prefers_hugdocker_path_over_legacy_path() {
+        let primary = temp_path("primary").join("config.toml");
+        let legacy = temp_path("legacy").join("config.toml");
+        fs::create_dir_all(primary.parent().expect("parent")).expect("primary dir");
+        fs::create_dir_all(legacy.parent().expect("parent")).expect("legacy dir");
+        fs::write(&primary, "[tui]\ntheme = \"ocean\"\n").expect("primary config");
+        fs::write(&legacy, "[tui]\ntheme = \"signal\"\n").expect("legacy config");
+
+        let config = load_config_from_paths(Some(primary.clone()), Some(legacy.clone()));
+
+        assert_eq!(config.tui.theme, "ocean");
+        let _ = fs::remove_dir_all(primary.parent().expect("parent"));
+        let _ = fs::remove_dir_all(legacy.parent().expect("parent"));
+    }
 }

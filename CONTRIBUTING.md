@@ -1,6 +1,6 @@
 # Contributing
 
-感谢参与 `dockerctl`。本项目面向 Linux 日常 Docker 管理，优先保证可靠、安全和高性能。
+感谢参与 `hugdocker`。本项目面向 Linux 日常 Docker 管理，优先保证可靠、安全和高性能。
 
 ## 原则
 

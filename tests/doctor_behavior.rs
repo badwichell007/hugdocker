@@ -1,6 +1,6 @@
-use dockerctl::config::AppConfig;
-use dockerctl::domain::{Container, ContainerState, DockerSnapshot, HealthStatus};
-use dockerctl::health::{analyze_snapshot, global_findings};
+use hugdocker::config::AppConfig;
+use hugdocker::domain::{Container, ContainerState, DockerSnapshot, HealthStatus};
+use hugdocker::health::{analyze_snapshot, global_findings, project_fingerprints};
 
 #[test]
 fn doctor_reports_ports_public_bind_restart_loop_and_anonymous_volume() {
@@ -147,11 +147,22 @@ fn doctor_reports_ports_public_bind_restart_loop_and_anonymous_volume() {
     assert!(global.iter().any(|finding| finding.contains("镜像膨胀")));
     assert!(global.iter().any(|finding| finding.contains("孤儿网络")));
     assert!(global.iter().any(|finding| finding.contains("孤儿卷")));
+
+    let fingerprints = project_fingerprints(&snapshot);
+    let shop_fingerprint = fingerprints
+        .iter()
+        .find(|fingerprint| fingerprint.project == "shop")
+        .expect("shop fingerprint");
+    assert!(shop_fingerprint.risk_score >= 40);
+    assert_eq!(
+        shop_fingerprint.suggested_command,
+        "hugdocker rescue shop --dry-run"
+    );
 }
 
 #[test]
 fn recipes_have_stable_scriptable_shape() {
-    let recipes = dockerctl::recipes::builtin_recipes();
+    let recipes = hugdocker::recipes::builtin_recipes();
 
     assert!(recipes.iter().any(|recipe| recipe.name == "panic-stop"));
     assert!(
@@ -167,6 +178,6 @@ fn recipes_have_stable_scriptable_shape() {
     assert!(
         recipes
             .iter()
-            .all(|recipe| recipe.command.starts_with("dockerctl "))
+            .all(|recipe| recipe.command.starts_with("hugdocker "))
     );
 }

@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -8,7 +8,7 @@ use clap_complete::{Shell, generate};
 use crate::config::{config_path, load_config, timeline_log_path, write_default_config};
 use crate::docker::{DockerClient, docker_cli_available};
 use crate::domain::{OperationAction, SortMode};
-use crate::health::{HealthReport, analyze_snapshot, global_findings};
+use crate::health::{HealthReport, analyze_snapshot, global_findings, project_fingerprints};
 use crate::inbox::build_ops_inbox;
 use crate::ops::OperationPlanner;
 use crate::output::{print_json, print_projects};
@@ -18,7 +18,7 @@ use crate::{AppResult, msg};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "dockerctl",
+    name = "hugdocker",
     version,
     about = "Linux 日常 Docker 项目管理 TUI/CLI"
 )]
@@ -333,8 +333,13 @@ pub async fn run() -> AppResult<()> {
         } => watch_command(config, interval, running, once).await,
         Commands::Completion { shell } => {
             let mut cmd = Cli::command();
-            generate(shell, &mut cmd, "dockerctl", &mut io::stdout());
-            Ok(())
+            let mut output = Vec::new();
+            generate(shell, &mut cmd, binary_name(), &mut output);
+            match io::stdout().write_all(&output) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+                Err(error) => Err(error.into()),
+            }
         }
         Commands::InitConfig { force } => {
             let Some(path) = config_path() else {
@@ -351,6 +356,17 @@ pub async fn run() -> AppResult<()> {
             Ok(())
         }
     }
+}
+
+fn binary_name() -> String {
+    std::env::args()
+        .next()
+        .and_then(|path| {
+            std::path::Path::new(&path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| "hugdocker".to_string())
 }
 
 fn recipes_command(json: bool) -> AppResult<()> {
@@ -456,10 +472,12 @@ async fn doctor_command(config: crate::config::AppConfig, json: bool) -> AppResu
     let snapshot = client.snapshot().await?;
     let projects = analyze_snapshot(&snapshot);
     let findings = global_findings(&snapshot);
+    let fingerprints = project_fingerprints(&snapshot);
     if json {
         return print_json(&serde_json::json!({
             "projects": projects,
             "findings": findings,
+            "fingerprints": fingerprints,
         }));
     }
     for project in projects {
@@ -470,6 +488,19 @@ async fn doctor_command(config: crate::config::AppConfig, json: bool) -> AppResu
     }
     for finding in findings {
         println!("全局: {finding}");
+    }
+    for fingerprint in fingerprints
+        .into_iter()
+        .filter(|item| item.risk_score > 0)
+        .take(5)
+    {
+        println!(
+            "指纹: {} score={} signals={} next={}",
+            fingerprint.project,
+            fingerprint.risk_score,
+            fingerprint.signals.join(", "),
+            fingerprint.suggested_command
+        );
     }
     Ok(())
 }
@@ -491,6 +522,7 @@ async fn health_command(config: crate::config::AppConfig, json: bool) -> AppResu
         docker_daemon,
         projects: analyze_snapshot(&snapshot),
         findings: global_findings(&snapshot),
+        fingerprints: project_fingerprints(&snapshot),
     };
     if json {
         print_json(&report)
@@ -505,6 +537,17 @@ async fn health_command(config: crate::config::AppConfig, json: bool) -> AppResu
         );
         for finding in report.findings {
             println!("全局: {finding}");
+        }
+        for fingerprint in report
+            .fingerprints
+            .into_iter()
+            .filter(|item| item.risk_score > 0)
+            .take(5)
+        {
+            println!(
+                "指纹: {} score={} next={}",
+                fingerprint.project, fingerprint.risk_score, fingerprint.suggested_command
+            );
         }
         Ok(())
     }

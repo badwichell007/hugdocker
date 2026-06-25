@@ -1,8 +1,8 @@
-use dockerctl::config::{AppConfig, ThemeName, parse_group_config, parse_theme};
-use dockerctl::domain::{
+use hugdocker::config::{AppConfig, ThemeName, parse_group_config, parse_theme};
+use hugdocker::domain::{
     Container, ContainerState, DockerSnapshot, OperationAction, ProjectKind, SortMode,
 };
-use dockerctl::ops::OperationPlanner;
+use hugdocker::ops::OperationPlanner;
 
 fn fixture_snapshot() -> DockerSnapshot {
     let mut config = AppConfig::default();

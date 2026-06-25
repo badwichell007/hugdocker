@@ -1,4 +1,4 @@
-use dockerctl::resources::{
+use hugdocker::resources::{
     ResourcePanelData, ResourceRow, ResourceSummary, cpu_percent, format_bytes,
     format_signed_bytes, resource_pressure_hint, resource_trend, sorted_resource_rows,
 };

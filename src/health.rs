@@ -10,6 +10,15 @@ pub struct HealthReport {
     pub docker_daemon: bool,
     pub projects: Vec<ProjectHealth>,
     pub findings: Vec<String>,
+    pub fingerprints: Vec<ProjectFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectFingerprint {
+    pub project: String,
+    pub risk_score: u16,
+    pub signals: Vec<String>,
+    pub suggested_command: String,
 }
 
 pub fn analyze_snapshot(snapshot: &DockerSnapshot) -> Vec<ProjectHealth> {
@@ -127,6 +136,87 @@ pub fn global_findings(snapshot: &DockerSnapshot) -> Vec<String> {
         findings.push(format!("疑似孤儿卷: {}", orphan_volumes.join(", ")));
     }
     findings
+}
+
+pub fn project_fingerprints(snapshot: &DockerSnapshot) -> Vec<ProjectFingerprint> {
+    let health = analyze_snapshot(snapshot);
+    let mut fingerprints = snapshot
+        .projects
+        .iter()
+        .map(|project| {
+            let findings = health
+                .iter()
+                .find(|item| item.project == project.name)
+                .map(|item| item.findings.clone())
+                .unwrap_or_default();
+            let mut signals = findings;
+            if project.active() == 0 {
+                signals.push("inactive".to_string());
+            }
+            if project
+                .ports
+                .iter()
+                .any(|port| port.starts_with("0.0.0.0:"))
+            {
+                signals.push("public_bind".to_string());
+            }
+            if project.images.len() >= 5 {
+                signals.push("image_bloat".to_string());
+            }
+            signals.sort();
+            signals.dedup();
+            ProjectFingerprint {
+                project: project.name.clone(),
+                risk_score: project_risk_score(project, &signals),
+                suggested_command: suggested_command(project, &signals),
+                signals,
+            }
+        })
+        .collect::<Vec<_>>();
+    fingerprints.sort_by(|a, b| {
+        b.risk_score
+            .cmp(&a.risk_score)
+            .then_with(|| a.project.cmp(&b.project))
+    });
+    fingerprints
+}
+
+fn project_risk_score(project: &crate::domain::Project, signals: &[String]) -> u16 {
+    let mut score = 0;
+    score += project.unhealthy as u16 * 40;
+    score += project.restarting as u16 * 35;
+    score += project.paused as u16 * 10;
+    score += signals
+        .iter()
+        .filter(|signal| signal.contains("公网监听"))
+        .count() as u16
+        * 10;
+    score += signals
+        .iter()
+        .filter(|signal| signal.contains("匿名卷"))
+        .count() as u16
+        * 8;
+    score += signals
+        .iter()
+        .filter(|signal| *signal == "public_bind")
+        .count() as u16
+        * 8;
+    score += signals
+        .iter()
+        .filter(|signal| *signal == "image_bloat")
+        .count() as u16
+        * 6;
+    score.min(100)
+}
+
+fn suggested_command(project: &crate::domain::Project, signals: &[String]) -> String {
+    if project.unhealthy > 0 || project.restarting > 0 {
+        return format!("hugdocker rescue {} --dry-run", project.name);
+    }
+    if signals.iter().any(|signal| signal == "inactive") {
+        return format!("hugdocker plan remove {}", project.name);
+    }
+    format!("hugdocker inspect {}", project.name)
 }
 
 fn looks_anonymous_volume(volume: &str) -> bool {

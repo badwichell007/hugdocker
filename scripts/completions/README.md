@@ -3,20 +3,20 @@
 生成补全脚本：
 
 ```bash
-dockerctl completion bash > dockerctl.bash
-dockerctl completion zsh > _dockerctl
-dockerctl completion fish > dockerctl.fish
+hugdocker completion bash > hugdocker.bash
+hugdocker completion zsh > _hugdocker
+hugdocker completion fish > hugdocker.fish
 ```
 
 常见安装位置：
 
 ```bash
 mkdir -p ~/.local/share/bash-completion/completions
-dockerctl completion bash > ~/.local/share/bash-completion/completions/dockerctl
+hugdocker completion bash > ~/.local/share/bash-completion/completions/hugdocker
 
 mkdir -p ~/.zfunc
-dockerctl completion zsh > ~/.zfunc/_dockerctl
+hugdocker completion zsh > ~/.zfunc/_hugdocker
 
 mkdir -p ~/.config/fish/completions
-dockerctl completion fish > ~/.config/fish/completions/dockerctl.fish
+hugdocker completion fish > ~/.config/fish/completions/hugdocker.fish
 ```

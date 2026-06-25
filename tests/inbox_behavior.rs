@@ -1,7 +1,7 @@
-use dockerctl::config::AppConfig;
-use dockerctl::domain::{Container, ContainerState, DockerSnapshot};
-use dockerctl::inbox::{InboxSeverity, build_ops_inbox};
-use dockerctl::resources::{ResourcePanelData, ResourceRow};
+use hugdocker::config::AppConfig;
+use hugdocker::domain::{Container, ContainerState, DockerSnapshot};
+use hugdocker::inbox::{InboxSeverity, build_ops_inbox};
+use hugdocker::resources::{ResourcePanelData, ResourceRow};
 
 fn snapshot_with_risk_and_cleanup() -> DockerSnapshot {
     DockerSnapshot::from_containers(
@@ -88,6 +88,12 @@ fn ops_inbox_prioritizes_risk_pressure_cleanup_and_next_action() {
         inbox
             .items
             .iter()
+            .any(|item| item.category == "Risk Fingerprint")
+    );
+    assert!(
+        inbox
+            .items
+            .iter()
             .any(|item| item.category == "Resource Pressure")
     );
     assert!(inbox.items.iter().any(|item| item.category == "Cleanup"));
@@ -101,13 +107,13 @@ fn ops_inbox_prioritizes_risk_pressure_cleanup_and_next_action() {
         inbox
             .items
             .iter()
-            .any(|item| item.command == "dockerctl rescue shop --dry-run")
+            .any(|item| item.command == "hugdocker rescue shop --dry-run")
     );
     assert!(
         inbox
             .items
             .iter()
-            .any(|item| item.command == "dockerctl safe-prune --dry-run")
+            .any(|item| item.command == "hugdocker safe-prune --dry-run")
     );
 }
 

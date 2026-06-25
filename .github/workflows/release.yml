@@ -39,13 +39,14 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist
+          cp target/${{ matrix.target }}/release/hugdocker dist/hugdocker
           cp target/${{ matrix.target }}/release/dockerctl dist/dockerctl
           cp README.md LICENSE dist/
-          tar -C dist -czf dockerctl-${{ matrix.target }}.tar.gz dockerctl README.md LICENSE
+          tar -C dist -czf hugdocker-${{ matrix.target }}.tar.gz hugdocker dockerctl README.md LICENSE
       - uses: actions/upload-artifact@v4
         with:
-          name: dockerctl-${{ matrix.target }}
-          path: dockerctl-${{ matrix.target }}.tar.gz
+          name: hugdocker-${{ matrix.target }}
+          path: hugdocker-${{ matrix.target }}.tar.gz
 
   publish:
     needs: build

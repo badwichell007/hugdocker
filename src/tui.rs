@@ -25,7 +25,7 @@ use tokio::task::JoinHandle;
 use crate::config::{ThemeName, parse_theme};
 use crate::docker::DockerClient;
 use crate::domain::{DockerSnapshot, OperationAction, Project, SortMode};
-use crate::health::{analyze_snapshot, global_findings};
+use crate::health::{analyze_snapshot, global_findings, project_fingerprints};
 use crate::inbox::{InboxItem, InboxSeverity, build_ops_inbox};
 use crate::ops::{OperationPlan, OperationPlanner};
 use crate::resources::{
@@ -1080,7 +1080,7 @@ fn render_compact_notice(frame: &mut ratatui::Frame, area: Rect) {
             MIN_TUI_WIDTH, MIN_TUI_HEIGHT, area.width, area.height
         )),
         Line::from(""),
-        Line::from("Resize the terminal or use dockerctl list / doctor / health."),
+        Line::from("Resize the terminal or use hugdocker list / doctor / health."),
     ];
     frame.render_widget(
         Paragraph::new(text)
@@ -1088,7 +1088,7 @@ fn render_compact_notice(frame: &mut ratatui::Frame, area: Rect) {
             .wrap(Wrap { trim: true })
             .block(
                 Block::default()
-                    .title("dockerctl")
+                    .title("hugdocker")
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(Color::Yellow)),
@@ -1113,7 +1113,7 @@ fn render_header(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, state:
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            " DOCKERCTL COMMAND CENTER",
+            " HUGDOCKER COMMAND CENTER",
             Style::default()
                 .fg(palette.primary)
                 .add_modifier(Modifier::BOLD),
@@ -1777,7 +1777,7 @@ fn render_logs_panel(
 
     frame.render_widget(
         Paragraph::new(format!(
-            "dockerctl logs {target} --tail 200 | filter: {filter} | highlights: error warn panic"
+            "hugdocker logs {target} --tail 200 | filter: {filter} | highlights: error warn panic"
         ))
         .alignment(Alignment::Center)
         .style(Style::default().fg(palette.muted).bg(palette.surface))
@@ -2264,7 +2264,7 @@ fn render_resource_footer(
         .unwrap_or_else(|| "no pressure signal".to_string());
     frame.render_widget(
         Paragraph::new(format!(
-            "r refresh | m resources | hotspot: {hint} | stats: dockerctl stats {target} --json"
+            "r refresh | m resources | hotspot: {hint} | stats: hugdocker stats {target} --json"
         ))
         .alignment(Alignment::Center)
         .block(
@@ -2673,6 +2673,25 @@ fn detail_text(state: &DashboardState) -> String {
 
 fn doctor_text(snapshot: &DockerSnapshot) -> String {
     let mut text = String::new();
+    let fingerprints = project_fingerprints(snapshot);
+    let risky_fingerprints = fingerprints
+        .iter()
+        .filter(|item| item.risk_score > 0)
+        .take(5)
+        .collect::<Vec<_>>();
+    if !risky_fingerprints.is_empty() {
+        text.push_str("Risk Fingerprints\n");
+        for fingerprint in risky_fingerprints {
+            text.push_str(&format!(
+                "- {} score={} signals={}\n  next: {}\n",
+                fingerprint.project,
+                fingerprint.risk_score,
+                fingerprint.signals.join(", "),
+                fingerprint.suggested_command
+            ));
+        }
+        text.push('\n');
+    }
     for health in analyze_snapshot(snapshot) {
         text.push_str(&format!("{:?} {}\n", health.status, health.project));
         for finding in health.findings {
@@ -2716,7 +2735,7 @@ fn logs_text(state: &DashboardState) -> String {
          n/p: switch container\n\
          error/warn: highlighted in output plan\n\n\
          commands\n\
-         dockerctl logs {target} --tail 200\n",
+         hugdocker logs {target} --tail 200\n",
         project.name,
         project.containers.len()
     );
@@ -2744,15 +2763,15 @@ fn resources_text(state: &DashboardState) -> String {
         "Resource Monitor\n\
          project: {}\n\
          containers: {} total / {} active\n\
-         CPU: use dockerctl stats for live sample\n\
-         MEM: use dockerctl stats for live sample\n\
+         CPU: use hugdocker stats for live sample\n\
+         MEM: use hugdocker stats for live sample\n\
          NET: {} networks, {} published ports\n\
          IO: {} volumes mounted\n\
          images: {}\n\n\
          commands\n\
-         dockerctl stats {target}\n\
-         dockerctl stats {target} --json\n\n\
-         note: v0.3.0 sorts high CPU/high memory/error rows first and feeds Ops Inbox signals.\n",
+         hugdocker stats {target}\n\
+         hugdocker stats {target} --json\n\n\
+         note: v0.4.0 feeds resource pressure and risk fingerprints into Ops Inbox.\n",
         project.name,
         project.containers.len(),
         project.active(),
@@ -2833,9 +2852,9 @@ fn format_rescue_playbook(plan: &OperationPlan) -> String {
         "\nRecovery Playbook\n\
          异常信号: 优先处理 unhealthy / restarting / active 容器。\n\
          执行策略: 先生成恢复重启预案，TUI 中需二次确认后才执行。\n\
-         验证命令: dockerctl rescue {target} --dry-run\n\
-         执行命令: dockerctl rescue {target}\n\
-         回滚提示: 若恢复后仍异常，先查看 dockerctl logs 和 doctor 输出，再考虑 remove/purge。\n"
+         验证命令: hugdocker rescue {target} --dry-run\n\
+         执行命令: hugdocker rescue {target}\n\
+         回滚提示: 若恢复后仍异常，先查看 hugdocker logs 和 doctor 输出，再考虑 remove/purge。\n"
     )
 }
 
@@ -2889,7 +2908,7 @@ fn is_destructive_action(action: OperationAction) -> bool {
 
 fn help_text() -> String {
     [
-        "dockerctl TUI",
+        "hugdocker TUI",
         "",
         "鼠标左键项目行: 选择/反选",
         "鼠标右键项目行: 打开管理菜单",

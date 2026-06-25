@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use dockerctl::config::{AppConfig, ThemeName};
-use dockerctl::domain::{Container, ContainerState, DockerSnapshot, OperationAction, SortMode};
-use dockerctl::resources::{ResourcePanelData, ResourceRow, ResourceTrend};
-use dockerctl::tui::{
+use hugdocker::config::{AppConfig, ThemeName};
+use hugdocker::domain::{Container, ContainerState, DockerSnapshot, OperationAction, SortMode};
+use hugdocker::resources::{ResourcePanelData, ResourceRow, ResourceTrend};
+use hugdocker::tui::{
     ContextMenuItem, ContextMenuState, DashboardState, MouseAction, TuiPanel, apply_mouse_action,
     begin_execution_prompt, execution_plan_if_confirmed, mark_resource_refresh_pending,
     mouse_action_for_event, push_execution_token, render_dashboard,
@@ -154,7 +154,7 @@ fn dashboard_renders_command_center_metrics_and_project_table() {
     let buffer = terminal.backend().buffer();
     let rendered = format!("{buffer:?}");
 
-    assert!(rendered.contains("DOCKERCTL COMMAND CENTER"));
+    assert!(rendered.contains("HUGDOCKER COMMAND CENTER"));
     assert!(rendered.contains("Projects"));
     assert!(rendered.contains("Risk"));
     assert!(rendered.contains("mingli"));
@@ -207,7 +207,7 @@ fn ops_inbox_panel_renders_prioritized_next_actions() {
     assert!(rendered.contains("Resource Pressure"));
     assert!(rendered.contains("Next Action"));
     assert!(rendered.contains("mingli"));
-    assert!(rendered.contains("dockerctl rescue"));
+    assert!(rendered.contains("hugdocker rescue"));
 }
 
 #[test]
@@ -224,7 +224,7 @@ fn signal_theme_changes_header_accent_color() {
 
     let buffer = terminal.backend().buffer();
 
-    assert!(rendered_text_has_fg(buffer, "DOCKERCTL", Color::Green));
+    assert!(rendered_text_has_fg(buffer, "HUGDOCKER", Color::Green));
 }
 
 #[test]
@@ -439,7 +439,7 @@ fn logs_panel_renders_log_lens_controls() {
     assert!(rendered.contains("ERROR"));
     assert!(rendered.contains("WARN"));
     assert!(rendered.contains("n/p switch container"));
-    assert!(rendered.contains("dockerctl logs web"));
+    assert!(rendered.contains("hugdocker logs web"));
 }
 
 #[test]
@@ -693,7 +693,7 @@ fn rescue_plan_renders_recovery_playbook() {
     assert!(rendered.contains("Recovery Playbook"));
     assert!(rendered.contains("异常信号"));
     assert!(rendered.contains("unhealthy"));
-    assert!(rendered.contains("dockerctl rescue mingli --dry-run"));
+    assert!(rendered.contains("hugdocker rescue mingli --dry-run"));
 }
 
 #[test]

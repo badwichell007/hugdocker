@@ -1,6 +1,6 @@
 [package]
-name = "dockerctl"
-version = "0.3.0"
+name = "hugdocker"
+version = "0.4.0"
 edition = "2024"
 description = "Fast project-first Docker TUI/CLI for Linux daily operations"
 license = "MIT"
@@ -10,6 +10,14 @@ homepage = "https://github.com/badwichell007/dockerctl"
 documentation = "https://github.com/badwichell007/dockerctl#readme"
 keywords = ["docker", "tui", "cli", "linux", "ops"]
 categories = ["command-line-utilities"]
+
+[[bin]]
+name = "hugdocker"
+path = "src/main.rs"
+
+[[bin]]
+name = "dockerctl"
+path = "src/dockerctl.rs"
 
 [dependencies]
 bollard = "0.20"
