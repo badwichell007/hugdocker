@@ -7,7 +7,7 @@
 面向 Linux 日常运维的高性能 Docker TUI/CLI。以项目为中心聚合 Compose、Stack 和 standalone 容器，提供资源监控、风险预演、安全执行、异常恢复、审计时间线和脚本化 JSON 输出。
 
 [![CI](https://github.com/badwichell007/hugdocker/actions/workflows/ci.yml/badge.svg)](https://github.com/badwichell007/hugdocker/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/badge/release-v0.4.3-0ea5e9)](https://github.com/badwichell007/hugdocker/releases)
+[![Release](https://img.shields.io/badge/release-v0.4.4-0ea5e9)](https://github.com/badwichell007/hugdocker/releases)
 [![Rust](https://img.shields.io/badge/Rust-2024-f97316)](https://www.rust-lang.org/)
 [![TUI](https://img.shields.io/badge/TUI-ratatui%20%2B%20crossterm-22c55e)](https://ratatui.rs/)
 [![Docker API](https://img.shields.io/badge/Docker%20API-bollard-2563eb)](https://github.com/fussybeaver/bollard)
@@ -120,7 +120,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ### 指定版本
 
 ```bash
-HUGDOCKER_VERSION=v0.4.3 curl -fsSL https://raw.githubusercontent.com/badwichell007/hugdocker/main/scripts/install.sh | bash
+HUGDOCKER_VERSION=v0.4.4 curl -fsSL https://raw.githubusercontent.com/badwichell007/hugdocker/main/scripts/install.sh | bash
 ```
 
 ### 源码安装
@@ -205,6 +205,8 @@ hugdocker rescue myapp --dry-run
 
 ```bash
 hugdocker logs <container-id-or-name> --tail 200
+hugdocker logs <container-id-or-name> --tail 200 --follow
+hugdocker logs <container-id-or-name> --filter error
 hugdocker stats <container-id-or-name>
 hugdocker stats <container-id-or-name> --json
 ```
@@ -290,7 +292,7 @@ Remove
 Purge
 ```
 
-`Exec` 会临时退出 TUI 全屏界面，执行 `docker exec -it <container> sh` 进入当前项目第一个 active 容器；退出 shell 后自动回到 TUI。
+`Exec` 会先打开 active 容器选择器，再临时退出 TUI 全屏界面执行 `docker exec -it <container> <shell>`；shell 按 `sh -> bash -> ash` fallback，退出后自动回到 TUI。
 
 选中的项目会显示 `[x]`、黄色加粗和暗色背景。即使光标移动到其他项目，已选状态仍保留，避免“选中了但看不出来”。
 
@@ -311,6 +313,9 @@ i             详情面板
 d             doctor 面板
 l             logs 面板
 m             resources 面板
+:             command palette 面板
+e             exec 容器选择器
+u             update 预案
 1             start 预演
 2             stop 预演
 3             restart 预演
@@ -474,11 +479,27 @@ hugdocker rescue myapp --yes
 
 ```bash
 hugdocker logs <container-id-or-name> --tail 200
+hugdocker logs <container-id-or-name> --tail 200 --follow
+hugdocker logs <container-id-or-name> --filter error
 hugdocker stats <container-id-or-name>
 hugdocker stats <container-id-or-name> --json
 hugdocker timeline --tail 100
 hugdocker timeline --watch
 ```
+
+### Compose 和安全更新
+
+```bash
+hugdocker compose myapp pull --dry-run
+hugdocker compose myapp pull --yes
+hugdocker compose myapp up web --yes
+hugdocker compose myapp rebuild api --yes
+hugdocker compose myapp restart --yes
+hugdocker update myapp --dry-run
+hugdocker update myapp --yes
+```
+
+`compose` 覆盖 `pull/up/down/rebuild/restart` 常用动作；`update` 输出 `pull -> restart plan -> doctor hint`，先复用 Operation Plan 展示影响范围，再执行 restart。
 
 默认状态文件：
 
@@ -685,6 +706,9 @@ OperationAction -> OperationPlan -> Confirmation -> Executor -> Audit
 - 让 Recipes 支持用户本地 TOML 配方，并继续复用 OperationPlan 安全执行。
 - 增强 Timeline：把 Docker events、操作审计和健康变化聚合成更可读的事件流。
 - 增强日志面板：TUI 内按容器切换、过滤关键字、高亮 error/warn，并避免日志拉取阻塞 UI。
+- 增强 Exec：右键容器选择器、shell fallback、容器级进入体验。
+- 增强 Compose Ops：把 pull/up/down/rebuild/restart 做成项目级安全入口。
+- 增强 Safe Update Flow：pull、restart plan、health hint 组合成日常更新动作。
 - 研究远程 Docker context 支持，优先保持本地 socket 的安全和低延迟体验。
 - 探索 Podman 兼容层，但不牺牲 Docker-first 的稳定性。
 - 增加可选历史指标文件，用于轻量趋势分析，不默认开启后台采集。
@@ -698,6 +722,15 @@ OperationAction -> OperationPlan -> Confirmation -> Executor -> Audit
 - 优先做好本地 Docker 运维，不把项目扩张成复杂平台。
 
 ## 更新日志
+
+### v0.4.4
+
+- TUI `Exec` 从“默认第一个 active 容器”升级为 active 容器选择器，支持 `sh -> bash -> ash` shell fallback。
+- 新增 `:` Command Palette 面板，集中展示当前项目的 logs、compose、update、doctor 高频命令。
+- `logs` 支持 `--follow` 和 `--filter`，并对 error/warn/panic/fatal 做终端高亮。
+- 新增 `compose` 子命令，覆盖 `pull/up/down/rebuild/restart`，默认 dry-run 可预览，执行需 `--yes`。
+- 新增 `update` 子命令，提供 `pull -> restart plan -> doctor hint` 的安全更新流。
+- Doctor 新增安全信号：privileged、Docker socket 挂载、host network、root 用户、敏感目录挂载，并进入 Ops Fingerprint 风险分。
 
 ### v0.4.3
 

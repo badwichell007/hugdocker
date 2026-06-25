@@ -424,7 +424,52 @@ fn context_menu_logs_and_resources_open_observability_panels() {
         },
     );
     assert_eq!(state.panel, TuiPanel::Resources);
+    assert_eq!(state.exec_container_index, Some(0));
     assert!(state.status.contains("Exec"));
+}
+
+#[test]
+fn exec_picker_renders_active_container_choices() {
+    let snapshot = sample_snapshot();
+    let mut state = DashboardState::from_snapshot(snapshot, SortMode::Severity);
+    apply_mouse_action(
+        &mut state,
+        MouseAction::ContextMenuClick {
+            item: ContextMenuItem::Exec,
+        },
+    );
+
+    let backend = TestBackend::new(120, 36);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| render_dashboard(frame, &mut state))
+        .expect("draw");
+
+    let rendered = format!("{:?}", terminal.backend().buffer());
+
+    assert!(rendered.contains("Select container shell"));
+    assert!(rendered.contains("web_1"));
+    assert!(rendered.contains("worker_1"));
+    assert!(rendered.contains("sh -> bash -> ash"));
+}
+
+#[test]
+fn command_palette_renders_fast_ops_commands() {
+    let snapshot = sample_snapshot();
+    let mut state = DashboardState::from_snapshot(snapshot, SortMode::Severity);
+    state.panel = TuiPanel::CommandPalette;
+
+    let backend = TestBackend::new(130, 36);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| render_dashboard(frame, &mut state))
+        .expect("draw");
+
+    let rendered = format!("{:?}", terminal.backend().buffer());
+
+    assert!(rendered.contains("Command Palette"));
+    assert!(rendered.contains("hugdocker update mingli --dry-run"));
+    assert!(rendered.contains("hugdocker compose mingli pull --dry-run"));
 }
 
 #[test]

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::io::{self, Write};
 use std::process::Command;
 
 use bollard::Docker;
@@ -70,12 +71,15 @@ impl DockerClient {
             .collect::<Vec<_>>();
         let resources = join_all(resource_futures).await;
         let mut containers = Vec::with_capacity(rows.len());
-        for (row, (networks, volumes)) in rows.into_iter().zip(resources) {
-            let labels = row
+        for (row, (networks, volumes, security)) in rows.into_iter().zip(resources) {
+            let mut labels = row
                 .labels
                 .unwrap_or_default()
                 .into_iter()
                 .collect::<BTreeMap<_, _>>();
+            if !security.is_empty() {
+                labels.insert("hugdocker.security".to_string(), security.join(","));
+            }
             let name = row
                 .names
                 .unwrap_or_default()
@@ -130,7 +134,10 @@ impl DockerClient {
         Ok(containers)
     }
 
-    async fn inspect_container_resources(&self, id: &str) -> AppResult<(Vec<String>, Vec<String>)> {
+    async fn inspect_container_resources(
+        &self,
+        id: &str,
+    ) -> AppResult<(Vec<String>, Vec<String>, Vec<String>)> {
         let detail = self.docker.inspect_container(id, None).await?;
         let mut networks = Vec::new();
         if let Some(settings) = detail.network_settings {
@@ -140,20 +147,67 @@ impl DockerClient {
         }
 
         let mut volumes = Vec::new();
-        if let Some(mounts) = detail.mounts {
+        if let Some(mounts) = detail.mounts.as_ref() {
             for mount in mounts {
                 if mount.typ.map(|value| value.to_string()).as_deref() == Some("volume") {
-                    if let Some(name) = mount.name {
-                        volumes.push(name);
+                    if let Some(name) = mount.name.as_ref() {
+                        volumes.push(name.clone());
                     }
                 }
             }
+        }
+        let mut security = Vec::new();
+        if detail
+            .host_config
+            .as_ref()
+            .and_then(|host| host.privileged)
+            .unwrap_or(false)
+        {
+            security.push("privileged".to_string());
+        }
+        if detail
+            .host_config
+            .as_ref()
+            .and_then(|host| host.network_mode.as_deref())
+            == Some("host")
+        {
+            security.push("host_network".to_string());
+        }
+        if detail
+            .config
+            .as_ref()
+            .and_then(|config| config.user.as_deref())
+            .unwrap_or("")
+            .is_empty()
+        {
+            security.push("root_user".to_string());
+        }
+        if detail.mounts.as_ref().is_some_and(|mounts| {
+            mounts.iter().any(|mount| {
+                mount.destination.as_deref() == Some("/var/run/docker.sock")
+                    || mount.source.as_deref() == Some("/var/run/docker.sock")
+            })
+        }) {
+            security.push("docker_sock".to_string());
+        }
+        if detail.mounts.as_ref().is_some_and(|mounts| {
+            mounts.iter().any(|mount| {
+                matches!(
+                    mount.destination.as_deref(),
+                    Some("/etc") | Some("/root") | Some("/var/lib/docker")
+                ) || matches!(
+                    mount.source.as_deref(),
+                    Some("/etc") | Some("/root") | Some("/var/lib/docker")
+                )
+            })
+        }) {
+            security.push("sensitive_mount".to_string());
         }
         networks.sort();
         networks.dedup();
         volumes.sort();
         volumes.dedup();
-        Ok((networks, volumes))
+        Ok((networks, volumes, security))
     }
 
     async fn list_network_names(&self) -> AppResult<Vec<String>> {
@@ -362,7 +416,12 @@ impl DockerClient {
         Ok(result)
     }
 
-    pub async fn container_logs(&self, container: &str, tail: usize) -> AppResult<Vec<String>> {
+    pub async fn container_logs(
+        &self,
+        container: &str,
+        tail: usize,
+        filter: Option<&str>,
+    ) -> AppResult<Vec<String>> {
         let tail_text = tail.to_string();
         let mut stream = self.docker.logs(
             container,
@@ -378,9 +437,42 @@ impl DockerClient {
         );
         let mut lines = Vec::new();
         while let Some(chunk) = stream.try_next().await? {
-            lines.push(chunk.to_string());
+            let text = chunk.to_string();
+            if filter.is_none_or(|needle| text.to_ascii_lowercase().contains(needle)) {
+                lines.push(text);
+            }
         }
         Ok(lines)
+    }
+
+    pub async fn follow_container_logs(
+        &self,
+        container: &str,
+        tail: usize,
+        filter: Option<&str>,
+    ) -> AppResult<()> {
+        let tail_text = tail.to_string();
+        let mut stream = self.docker.logs(
+            container,
+            Some(
+                LogsOptionsBuilder::default()
+                    .stdout(true)
+                    .stderr(true)
+                    .tail(&tail_text)
+                    .timestamps(false)
+                    .follow(true)
+                    .build(),
+            ),
+        );
+        let mut stdout = io::stdout();
+        while let Some(chunk) = stream.try_next().await? {
+            let text = chunk.to_string();
+            if filter.is_none_or(|needle| text.to_ascii_lowercase().contains(needle)) {
+                stdout.write_all(highlight_log_line(&text).as_bytes())?;
+                stdout.flush()?;
+            }
+        }
+        Ok(())
     }
 
     pub async fn container_stats_once(&self, container: &str) -> AppResult<ContainerStats> {
@@ -525,6 +617,18 @@ impl DockerClient {
     }
 }
 
+pub fn docker_compose_project(project: &str, args: &[&str]) -> AppResult<()> {
+    let status = Command::new("docker")
+        .args(["compose", "-p", project])
+        .args(args)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        msg(format!("docker compose 退出状态: {status}"))
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ContainerStats {
     pub name: String,
@@ -587,4 +691,15 @@ pub fn docker_cli_available() -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+pub fn highlight_log_line(line: &str) -> String {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("error") || lower.contains("panic") || lower.contains("fatal") {
+        format!("\x1b[31m{line}\x1b[0m")
+    } else if lower.contains("warn") {
+        format!("\x1b[33m{line}\x1b[0m")
+    } else {
+        line.to_string()
+    }
 }

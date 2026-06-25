@@ -50,6 +50,9 @@ pub fn analyze_snapshot(snapshot: &DockerSnapshot) -> Vec<ProjectHealth> {
                 if container.state == ContainerState::Restarting {
                     findings.push(format!("restart loop: {}", container.name));
                 }
+                for risk in container_security_risks(container) {
+                    findings.push(format!("security risk: {} {risk}", container.name));
+                }
                 for volume in &container.volumes {
                     if looks_anonymous_volume(volume) {
                         findings.push(format!("疑似匿名卷: {volume}"));
@@ -67,6 +70,9 @@ pub fn analyze_snapshot(snapshot: &DockerSnapshot) -> Vec<ProjectHealth> {
             } else if project.paused > 0
                 || has_duplicate_ports(&project.ports)
                 || findings.iter().any(|finding| finding.contains("公网监听"))
+                || findings
+                    .iter()
+                    .any(|finding| finding.contains("security risk"))
             {
                 HealthStatus::Warning
             } else {
@@ -165,6 +171,11 @@ pub fn project_fingerprints(snapshot: &DockerSnapshot) -> Vec<ProjectFingerprint
             if project.images.len() >= 5 {
                 signals.push("image_bloat".to_string());
             }
+            for container in &project.containers {
+                for risk in container_security_risks(container) {
+                    signals.push(format!("security:{risk}"));
+                }
+            }
             let stale_stopped = project
                 .containers
                 .iter()
@@ -241,6 +252,11 @@ fn project_risk_score(project: &crate::domain::Project, signals: &[String]) -> u
         .filter(|signal| signal.starts_with("stale_stopped:"))
         .count() as u16
         * 10;
+    score += signals
+        .iter()
+        .filter(|signal| signal.starts_with("security:"))
+        .count() as u16
+        * 12;
     score.min(100)
 }
 
@@ -268,6 +284,20 @@ fn suggested_command(project: &crate::domain::Project, signals: &[String]) -> St
 
 fn looks_anonymous_volume(volume: &str) -> bool {
     volume.len() >= 32 && volume.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn container_security_risks(container: &crate::domain::Container) -> Vec<String> {
+    container
+        .labels
+        .get("hugdocker.security")
+        .map(|value| {
+            value
+                .split(',')
+                .filter(|risk| !risk.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn has_duplicate_ports(ports: &[String]) -> bool {

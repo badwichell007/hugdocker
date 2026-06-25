@@ -118,6 +118,7 @@ pub enum TuiPanel {
     Doctor,
     Logs,
     Resources,
+    CommandPalette,
     Plan(OperationAction),
     Help,
 }
@@ -218,6 +219,7 @@ pub struct DashboardState {
     pub resource_data: Option<ResourcePanelData>,
     pub resource_trend: Option<ResourceTrend>,
     pub log_container_index: usize,
+    pub exec_container_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,6 +252,7 @@ impl DashboardState {
             resource_data: None,
             resource_trend: None,
             log_container_index: 0,
+            exec_container_index: None,
         };
         state.rebuild_filtered();
         state
@@ -449,7 +452,7 @@ pub fn apply_mouse_action(state: &mut DashboardState, action: MouseAction) {
                 state.panel = panel;
                 state.status = format!("已选择右键菜单动作: {}", item.label());
             } else {
-                state.status = "Exec 将进入当前项目的第一个 active 容器。".to_string();
+                open_exec_picker(state);
             }
         }
         MouseAction::CloseContextMenu => {
@@ -489,6 +492,7 @@ struct TuiApp {
     last_refresh: Instant,
     last_resource_refresh: Option<Instant>,
     log_container_index: usize,
+    exec_container_index: Option<usize>,
 }
 
 impl TuiApp {
@@ -518,6 +522,7 @@ impl TuiApp {
             last_refresh: Instant::now(),
             last_resource_refresh: None,
             log_container_index: 0,
+            exec_container_index: None,
         };
         app.rebuild_filtered();
         Ok(app)
@@ -559,7 +564,7 @@ impl TuiApp {
     async fn handle_mouse(
         &mut self,
         mouse: MouseEvent,
-        session: &mut TerminalSession,
+        _session: &mut TerminalSession,
     ) -> AppResult<bool> {
         let Some(action) = mouse_action_for_event(
             mouse,
@@ -575,7 +580,7 @@ impl TuiApp {
         {
             self.context_menu = None;
             self.execution_prompt = None;
-            self.exec_current_container(session).await?;
+            self.open_exec_picker();
             return Ok(true);
         }
         let mut state = DashboardState {
@@ -597,6 +602,7 @@ impl TuiApp {
                 self.resource_data.as_ref(),
             ),
             log_container_index: self.log_container_index,
+            exec_container_index: self.exec_container_index,
         };
         state.table_state.select(self.list_state.selected());
         apply_mouse_action(&mut state, action);
@@ -607,6 +613,7 @@ impl TuiApp {
         self.execution_prompt = state.execution_prompt;
         self.resource_data = state.resource_data;
         self.log_container_index = state.log_container_index;
+        self.exec_container_index = state.exec_container_index;
         self.list_state.select(state.table_state.selected());
         Ok(true)
     }
@@ -618,6 +625,9 @@ impl TuiApp {
     ) -> AppResult<bool> {
         if self.execution_prompt.is_some() {
             return self.handle_execution_key(code).await;
+        }
+        if self.exec_container_index.is_some() {
+            return self.handle_exec_picker_key(code, session).await;
         }
         if self.context_menu.is_some() {
             return self.handle_context_menu_key(code, session).await;
@@ -715,6 +725,10 @@ impl TuiApp {
                 self.context_menu = None;
                 self.panel = TuiPanel::Logs;
             }
+            KeyCode::Char('e') => {
+                self.context_menu = None;
+                self.open_exec_picker();
+            }
             KeyCode::Char('n') if self.panel == TuiPanel::Logs => {
                 self.context_menu = None;
                 self.shift_log_container(1);
@@ -726,6 +740,15 @@ impl TuiApp {
             KeyCode::Char('m') => {
                 self.context_menu = None;
                 self.panel = TuiPanel::Resources;
+            }
+            KeyCode::Char(':') => {
+                self.context_menu = None;
+                self.panel = TuiPanel::CommandPalette;
+            }
+            KeyCode::Char('u') => {
+                self.context_menu = None;
+                self.panel = TuiPanel::Plan(OperationAction::Restart);
+                self.status = current_project_update_hint(self.current_project());
             }
             KeyCode::Char('i') => {
                 self.context_menu = None;
@@ -745,10 +768,28 @@ impl TuiApp {
         Ok(false)
     }
 
-    async fn handle_context_menu_key(
+    async fn handle_exec_picker_key(
         &mut self,
         code: KeyCode,
         session: &mut TerminalSession,
+    ) -> AppResult<bool> {
+        match code {
+            KeyCode::Esc => {
+                self.exec_container_index = None;
+                self.status = "已取消进入容器。".to_string();
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.shift_exec_container(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.shift_exec_container(1),
+            KeyCode::Enter => self.exec_current_container(session).await?,
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    async fn handle_context_menu_key(
+        &mut self,
+        code: KeyCode,
+        _session: &mut TerminalSession,
     ) -> AppResult<bool> {
         match code {
             KeyCode::Esc => self.context_menu = None,
@@ -768,7 +809,7 @@ impl TuiApp {
                     if item == ContextMenuItem::Exec {
                         self.context_menu = None;
                         self.execution_prompt = None;
-                        self.exec_current_container(session).await?;
+                        self.open_exec_picker();
                         return Ok(false);
                     }
                     let mut state = self.dashboard_state();
@@ -785,22 +826,20 @@ impl TuiApp {
     }
 
     async fn exec_current_container(&mut self, session: &mut TerminalSession) -> AppResult<()> {
-        let Some(container) = self.current_exec_container() else {
+        let Some(container) = self.current_exec_container().cloned() else {
             self.status = "当前项目没有 active 容器可进入。".to_string();
             return Ok(());
         };
         let label = container.name.clone();
         let id = container.id.clone();
         session.suspend()?;
-        let result = Command::new("docker")
-            .args(["exec", "-it", &id, "sh"])
-            .status();
+        let result = exec_shell_with_fallback(&id);
         session.resume()?;
         self.status = match result {
-            Ok(status) if status.success() => format!("已退出容器 shell: {label}"),
-            Ok(status) => format!("容器 shell 已退出，状态码: {status}"),
+            Ok(shell) => format!("已退出容器 shell: {label} ({shell})"),
             Err(error) => format!("无法执行 docker exec: {error}"),
         };
+        self.exec_container_index = None;
         Ok(())
     }
 
@@ -946,10 +985,43 @@ impl TuiApp {
     }
 
     fn current_exec_container(&self) -> Option<&crate::domain::Container> {
-        self.current_project()?
-            .containers
-            .iter()
-            .find(|container| container.state.is_active() && !container.id.is_empty())
+        let project = self.current_project()?;
+        let active = active_exec_containers(project);
+        let index = self
+            .exec_container_index
+            .unwrap_or(0)
+            .min(active.len().saturating_sub(1));
+        active.get(index).copied()
+    }
+
+    fn open_exec_picker(&mut self) {
+        let mut state = self.dashboard_state();
+        open_exec_picker(&mut state);
+        self.panel = state.panel;
+        self.status = state.status;
+        self.exec_container_index = state.exec_container_index;
+    }
+
+    fn shift_exec_container(&mut self, delta: isize) {
+        let len = self
+            .current_project()
+            .map(|project| active_exec_containers(project).len())
+            .unwrap_or(0);
+        if len == 0 {
+            self.exec_container_index = None;
+            return;
+        }
+        let current = self.exec_container_index.unwrap_or(0);
+        self.exec_container_index = Some(if delta.is_negative() {
+            current.saturating_sub(delta.unsigned_abs())
+        } else {
+            (current + delta as usize).min(len - 1)
+        });
+        self.status = format!(
+            "Exec 容器 {}/{}，Enter 进入，Esc 取消。",
+            self.exec_container_index.unwrap_or(0) + 1,
+            len
+        );
     }
 
     fn shift_log_container(&mut self, delta: isize) {
@@ -994,6 +1066,7 @@ impl TuiApp {
                 self.resource_data.as_ref(),
             ),
             log_container_index: self.log_container_index,
+            exec_container_index: self.exec_container_index,
         };
         state.table_state.select(self.list_state.selected());
         state
@@ -1144,6 +1217,7 @@ pub fn render_dashboard(frame: &mut ratatui::Frame, state: &mut DashboardState) 
     render_ops_deck(frame, main[1], state);
     render_command_bar(frame, outer[3], state);
     render_context_menu(frame, area, state);
+    render_exec_picker(frame, area, state);
 }
 
 fn is_compact_terminal(area: Rect) -> bool {
@@ -1475,6 +1549,7 @@ fn render_ops_deck(
         TuiPanel::Doctor => "Ops Deck / Doctor",
         TuiPanel::Logs => "Ops Deck / Logs",
         TuiPanel::Resources => "Ops Deck / Resources",
+        TuiPanel::CommandPalette => "Ops Deck / Command Palette",
         TuiPanel::Plan(OperationAction::Start) => "Ops Deck / Plan Start",
         TuiPanel::Plan(OperationAction::Stop) => "Ops Deck / Plan Stop",
         TuiPanel::Plan(OperationAction::Restart) => "Ops Deck / Plan Restart",
@@ -2406,7 +2481,7 @@ fn render_command_bar(
 ) {
     let palette = theme_palette(state.theme);
     let text = if state.status.is_empty() {
-        " mouse: click row select, right-click manage, wheel move | keys: j/k move | space select | / filter | i detail | d doctor | l logs | m resources | 1-5 plan | Enter execute | q quit "
+        " mouse: click row select, right-click manage, wheel move | keys: j/k move | space select | / filter | : palette | e exec | u update | q quit "
             .to_string()
     } else {
         state.status.clone()
@@ -2472,6 +2547,93 @@ fn render_context_menu(
         ),
         rect,
     );
+}
+
+fn render_exec_picker(frame: &mut ratatui::Frame, area: Rect, state: &DashboardState) {
+    let Some(selected_index) = state.exec_container_index else {
+        return;
+    };
+    let Some(project) = state.current_project() else {
+        return;
+    };
+    let containers = active_exec_containers(project);
+    if containers.is_empty() {
+        return;
+    }
+    let palette = theme_palette(state.theme);
+    let width = 72.min(area.width.saturating_sub(4)).max(1);
+    let height = (containers.len() as u16 + 5)
+        .min(area.height.saturating_sub(4))
+        .max(1);
+    let rect = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    let lines = std::iter::once(Line::from(vec![
+        Span::styled(
+            "Select container shell",
+            Style::default()
+                .fg(palette.primary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            " | Enter exec | Esc cancel",
+            Style::default().fg(palette.muted),
+        ),
+    ]))
+    .chain(containers.iter().enumerate().map(|(index, container)| {
+        let selected = index == selected_index;
+        Line::from(vec![
+            Span::styled(
+                if selected { "> " } else { "  " },
+                exec_picker_style(selected, palette),
+            ),
+            Span::styled(
+                format!("{:<5} ", container.state.state_code()),
+                log_state_style(container, palette),
+            ),
+            Span::styled(container.name.clone(), exec_picker_style(selected, palette)),
+            Span::styled(
+                format!("  {}", container.image),
+                Style::default().fg(palette.muted).bg(if selected {
+                    palette.selection
+                } else {
+                    palette.surface
+                }),
+            ),
+        ])
+    }))
+    .chain(std::iter::once(Line::from(Span::styled(
+        "shell fallback: sh -> bash -> ash",
+        Style::default().fg(palette.warning),
+    ))))
+    .collect::<Vec<_>>();
+
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(format!("Exec / {}", project.name))
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(palette.primary))
+                .style(Style::default().bg(palette.surface)),
+        ),
+        rect,
+    );
+}
+
+fn exec_picker_style(selected: bool, palette: ThemePalette) -> Style {
+    if selected {
+        Style::default()
+            .fg(Color::White)
+            .bg(palette.selection)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White).bg(palette.surface)
+    }
 }
 
 pub fn mouse_action_for_event(
@@ -2637,6 +2799,47 @@ fn context_menu_selected_item(menu: &ContextMenuState) -> ContextMenuItem {
         .unwrap_or(ContextMenuItem::Inspect)
 }
 
+fn open_exec_picker(state: &mut DashboardState) {
+    let Some(project) = state.current_project() else {
+        state.exec_container_index = None;
+        state.status = "当前没有项目可进入。".to_string();
+        return;
+    };
+    let len = active_exec_containers(project).len();
+    if len == 0 {
+        state.exec_container_index = None;
+        state.status = "当前项目没有 active 容器可进入。".to_string();
+        return;
+    }
+    state.exec_container_index = Some(0);
+    state.status = format!("Exec 选择器已打开: {len} 个 active 容器。");
+}
+
+fn active_exec_containers(project: &Project) -> Vec<&crate::domain::Container> {
+    project
+        .containers
+        .iter()
+        .filter(|container| container.state.is_active() && !container.id.is_empty())
+        .collect()
+}
+
+fn exec_shell_with_fallback(container_id: &str) -> AppResult<String> {
+    let mut last_status = None;
+    for shell in ["sh", "bash", "ash"] {
+        let status = Command::new("docker")
+            .args(["exec", "-it", container_id, shell])
+            .status()?;
+        if status.success() {
+            return Ok(shell.to_string());
+        }
+        last_status = Some(status.to_string());
+    }
+    msg(format!(
+        "sh/bash/ash 都无法进入，最后状态码: {}",
+        last_status.unwrap_or_else(|| "unknown".to_string())
+    ))
+}
+
 fn dashboard_metrics(state: &DashboardState, palette: ThemePalette) -> Vec<MetricTile> {
     let total = state.snapshot.projects.len();
     let active = state
@@ -2706,6 +2909,7 @@ fn panel_text(state: &DashboardState) -> String {
         TuiPanel::Doctor => doctor_text(&state.snapshot),
         TuiPanel::Logs => logs_text(state),
         TuiPanel::Resources => resources_text(state),
+        TuiPanel::CommandPalette => command_palette_text(state),
         TuiPanel::Plan(action) => state
             .plan_for(action)
             .map(|plan| format_plan(plan, state.execution_prompt.as_ref()))
@@ -2870,6 +3074,56 @@ fn resources_text(state: &DashboardState) -> String {
     )
 }
 
+fn command_palette_text(state: &DashboardState) -> String {
+    let Some(project) = state.current_project() else {
+        return "Command Palette\nNo project matches current filter.".to_string();
+    };
+    let container = project
+        .containers
+        .get(
+            state
+                .log_container_index
+                .min(project.containers.len().saturating_sub(1)),
+        )
+        .or_else(|| project.containers.first());
+    let target = container
+        .map(|container| container.id.as_str())
+        .unwrap_or(project.name.as_str());
+    [
+        "Command Palette",
+        "",
+        &format!("target project: {}", project.name),
+        "",
+        "Fast actions",
+        "  e                open exec container picker",
+        "  u                update plan: pull -> restart -> doctor",
+        "  1/2/3            start / stop / restart plan",
+        "  d/l/m            doctor / logs / resources",
+        "",
+        "CLI equivalents",
+        &format!("  hugdocker logs {target} --tail 200 --follow"),
+        &format!("  hugdocker logs {target} --filter error"),
+        &format!("  hugdocker compose {} pull --dry-run", project.name),
+        &format!("  hugdocker update {} --dry-run", project.name),
+        &format!(
+            "  hugdocker doctor --json | jq '.projects[] | select(.project==\"{}\")'",
+            project.name
+        ),
+    ]
+    .join("\n")
+}
+
+fn current_project_update_hint(project: Option<&Project>) -> String {
+    project
+        .map(|project| {
+            format!(
+                "Update 预案: 先执行 hugdocker update {} --dry-run，再确认 restart。",
+                project.name
+            )
+        })
+        .unwrap_or_else(|| "当前没有项目可更新。".to_string())
+}
+
 fn project_style(project: &Project, palette: ThemePalette) -> Style {
     if project.unhealthy > 0 {
         Style::default().fg(palette.danger)
@@ -3006,6 +3260,7 @@ fn help_text() -> String {
         "/: 输入过滤；Backspace 删除过滤字符",
         "x: 仅活动项目；o: 切换排序；r: 刷新",
         "b: inbox；i: 详情；d: doctor；l: logs；m: resources",
+        ": 命令面板；e: exec；u: update 预案",
         "1/2/3/4/5: start/stop/restart/remove/purge 预演",
         "Enter: 在计划面板打开执行确认；确认中再次 Enter 执行",
         "q/Esc: 退出；确认中 Esc 取消执行",

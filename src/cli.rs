@@ -6,7 +6,9 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 
 use crate::config::{config_path, load_config, timeline_log_path, write_default_config};
-use crate::docker::{DockerClient, docker_cli_available};
+use crate::docker::{
+    DockerClient, docker_cli_available, docker_compose_project, highlight_log_line,
+};
 use crate::domain::{OperationAction, SortMode};
 use crate::health::{HealthReport, analyze_snapshot, global_findings, project_fingerprints};
 use crate::inbox::build_ops_inbox;
@@ -56,6 +58,10 @@ pub enum Commands {
         container: String,
         #[arg(long, default_value_t = 200)]
         tail: usize,
+        #[arg(long)]
+        follow: bool,
+        #[arg(long)]
+        filter: Option<String>,
     },
     /// 显示容器单次资源采样
     Stats {
@@ -93,6 +99,19 @@ pub enum Commands {
     Restart(OperationArgs),
     /// 快速恢复异常项目
     Rescue(OperationArgs),
+    /// Compose 项目日常操作：pull/up/down/rebuild/restart
+    Compose {
+        project: String,
+        #[arg(value_enum)]
+        action: ComposeActionArg,
+        service: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// 安全更新项目：pull -> plan -> restart -> health hint
+    Update(OperationArgs),
     /// 删除项目，保留卷和镜像
     Remove(OperationArgs),
     /// 完全删除项目，包含卷和镜像
@@ -187,6 +206,15 @@ pub enum ActionArg {
     Rescue,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ComposeActionArg {
+    Pull,
+    Up,
+    Down,
+    Rebuild,
+    Restart,
+}
+
 impl From<ActionArg> for OperationAction {
     fn from(value: ActionArg) -> Self {
         match value {
@@ -274,12 +302,27 @@ pub async fn run() -> AppResult<()> {
                 Ok(())
             }
         }
-        Commands::Logs { container, tail } => {
+        Commands::Logs {
+            container,
+            tail,
+            follow,
+            filter,
+        } => {
             let client = DockerClient::connect(config)?;
-            for line in client.container_logs(&container, tail).await? {
-                print!("{line}");
+            let filter = filter.map(|value| value.to_ascii_lowercase());
+            if follow {
+                client
+                    .follow_container_logs(&container, tail, filter.as_deref())
+                    .await
+            } else {
+                for line in client
+                    .container_logs(&container, tail, filter.as_deref())
+                    .await?
+                {
+                    print!("{}", highlight_log_line(&line));
+                }
+                Ok(())
             }
-            Ok(())
         }
         Commands::Stats { container, json } => {
             let client = DockerClient::connect(config)?;
@@ -313,6 +356,14 @@ pub async fn run() -> AppResult<()> {
         Commands::Stop(args) => operation_command(config, OperationAction::Stop, args).await,
         Commands::Restart(args) => operation_command(config, OperationAction::Restart, args).await,
         Commands::Rescue(args) => operation_command(config, OperationAction::Rescue, args).await,
+        Commands::Compose {
+            project,
+            action,
+            service,
+            dry_run,
+            yes,
+        } => compose_command(project, action, service, dry_run, yes),
+        Commands::Update(args) => update_command(config, args).await,
         Commands::Remove(args) => operation_command(config, OperationAction::Remove, args).await,
         Commands::Purge(args) => operation_command(config, OperationAction::Purge, args).await,
         Commands::SafePrune(args) | Commands::Prune(args) => prune_command(config, args).await,
@@ -653,6 +704,69 @@ fn action_name(action: OperationAction) -> &'static str {
         OperationAction::Prune => "safe-prune",
         OperationAction::Rescue => "rescue",
     }
+}
+
+fn compose_command(
+    project: String,
+    action: ComposeActionArg,
+    service: Option<String>,
+    dry_run: bool,
+    yes: bool,
+) -> AppResult<()> {
+    let args = compose_args(action, service.as_deref());
+    println!("docker compose -p {} {}", project, args.join(" "));
+    if dry_run {
+        return Ok(());
+    }
+    if !yes {
+        println!("Compose 操作需要 --yes 执行。");
+        return Ok(());
+    }
+    docker_compose_project(&project, &args)
+}
+
+fn compose_args(action: ComposeActionArg, service: Option<&str>) -> Vec<&str> {
+    match action {
+        ComposeActionArg::Pull => service.map_or(vec!["pull"], |svc| vec!["pull", svc]),
+        ComposeActionArg::Up => service.map_or(vec!["up", "-d"], |svc| vec!["up", "-d", svc]),
+        ComposeActionArg::Down => vec!["down"],
+        ComposeActionArg::Rebuild => service.map_or(vec!["up", "-d", "--build"], |svc| {
+            vec!["up", "-d", "--build", svc]
+        }),
+        ComposeActionArg::Restart => service.map_or(vec!["restart"], |svc| vec!["restart", svc]),
+    }
+}
+
+async fn update_command(config: crate::config::AppConfig, args: OperationArgs) -> AppResult<()> {
+    let client = DockerClient::connect(config)?;
+    let snapshot = client.snapshot().await?;
+    let plan = OperationPlanner::new(&snapshot).plan(OperationAction::Restart, &args.projects)?;
+    println!("Safe Update Flow");
+    for project in &plan.projects {
+        println!("pull: docker compose -p {project} pull");
+    }
+    print_plan(&plan);
+    println!("health: hugdocker doctor");
+    if args.dry_run {
+        return Ok(());
+    }
+    match confirmation_decision(&plan, args.yes, args.confirm_token.as_deref())? {
+        ConfirmationDecision::Execute => {}
+        ConfirmationDecision::Prompt => require_confirmation(&plan)?,
+    }
+    for project in &plan.projects {
+        let _ = docker_compose_project(project, &["pull"]);
+    }
+    let result = client.execute_plan(&plan, false).await?;
+    println!(
+        "更新完成: restart 成功 {} 个，失败 {} 个；建议执行 hugdocker doctor。",
+        result.success.len(),
+        result.failed.len()
+    );
+    for failed in result.failed {
+        eprintln!("失败 {}: {}", failed.target, failed.message);
+    }
+    Ok(())
 }
 
 fn format_stats_line(stats: &crate::docker::ContainerStats) -> String {

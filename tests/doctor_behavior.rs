@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use hugdocker::config::AppConfig;
 use hugdocker::domain::{Container, ContainerState, DockerSnapshot, HealthStatus};
 use hugdocker::health::{analyze_snapshot, global_findings, project_fingerprints};
@@ -14,7 +16,10 @@ fn doctor_reports_ports_public_bind_restart_loop_and_anonymous_volume() {
                 status: "Restarting".into(),
                 compose_project: Some("shop".into()),
                 stack_namespace: None,
-                labels: Default::default(),
+                labels: BTreeMap::from([(
+                    "hugdocker.security".into(),
+                    "privileged,docker_sock,root_user".into(),
+                )]),
                 networks: vec!["shop_default".into()],
                 volumes: vec!["0123456789abcdef0123456789abcdef".into()],
                 ports: vec!["0.0.0.0:8080->80/tcp".into()],
@@ -156,6 +161,11 @@ fn doctor_reports_ports_public_bind_restart_loop_and_anonymous_volume() {
             .iter()
             .any(|finding| finding.contains("匿名卷"))
     );
+    assert!(
+        shop.findings
+            .iter()
+            .any(|finding| finding.contains("security risk"))
+    );
     let global = global_findings(&snapshot);
     assert!(global.iter().any(|finding| finding.contains("端口 8080")));
     assert!(global.iter().any(|finding| finding.contains("镜像膨胀")));
@@ -195,6 +205,12 @@ fn doctor_reports_ports_public_bind_restart_loop_and_anonymous_volume() {
             .any(|signal| signal == "shared_volume:shared_data")
     );
     assert!(api_fingerprint.risk_score >= 15);
+    assert!(
+        shop_fingerprint
+            .signals
+            .iter()
+            .any(|signal| signal == "security:privileged")
+    );
     let fat_fingerprint = fingerprints
         .iter()
         .find(|fingerprint| fingerprint.project == "fat")

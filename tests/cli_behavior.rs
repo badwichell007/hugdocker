@@ -9,9 +9,31 @@ fn help_lists_daily_docker_workflow_commands() {
         predicate::str::contains("Linux 日常 Docker 项目管理")
             .and(predicate::str::contains("list"))
             .and(predicate::str::contains("inbox"))
+            .and(predicate::str::contains("compose"))
+            .and(predicate::str::contains("update"))
             .and(predicate::str::contains("safe-prune"))
             .and(predicate::str::contains("completion")),
     );
+}
+
+#[test]
+fn logs_help_documents_follow_and_filter() {
+    let mut cmd = Command::cargo_bin("hugdocker").expect("binary");
+
+    cmd.args(["logs", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--follow").and(predicate::str::contains("--filter")));
+}
+
+#[test]
+fn compose_dry_run_does_not_require_docker_daemon() {
+    let mut cmd = Command::cargo_bin("hugdocker").expect("binary");
+
+    cmd.args(["compose", "shop", "pull", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("docker compose -p shop pull"));
 }
 
 #[test]

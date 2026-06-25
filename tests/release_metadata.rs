@@ -1,10 +1,10 @@
 use std::fs;
 
 #[test]
-fn release_metadata_targets_public_v043_repository() {
+fn release_metadata_targets_public_v044_repository() {
     let manifest = fs::read_to_string("Cargo.toml").expect("Cargo.toml");
     assert!(manifest.contains("name = \"hugdocker\""));
-    assert!(manifest.contains("version = \"0.4.3\""));
+    assert!(manifest.contains("version = \"0.4.4\""));
     assert!(manifest.contains("repository = \"https://github.com/badwichell007/hugdocker\""));
     assert!(manifest.contains("homepage = \"https://github.com/badwichell007/hugdocker\""));
     assert!(
@@ -14,9 +14,10 @@ fn release_metadata_targets_public_v043_repository() {
 
     let readme = fs::read_to_string("README.md").expect("README.md");
     assert!(readme.contains("badwichell007/hugdocker"));
-    assert!(readme.contains("HUGDOCKER_VERSION=v0.4.3"));
+    assert!(readme.contains("HUGDOCKER_VERSION=v0.4.4"));
     assert!(readme.contains("hugdocker inbox --json"));
-    assert!(readme.contains("### v0.4.3"));
+    assert!(readme.contains("### v0.4.4"));
+    assert!(readme.contains("hugdocker update myapp --dry-run"));
     assert!(readme.contains("Ops Inbox"));
     assert!(readme.contains("Ops Fingerprint"));
 
@@ -29,9 +30,9 @@ fn release_metadata_targets_public_v043_repository() {
     assert!(config.contains("theme = \"cockpit\""));
 
     let release_notes =
-        fs::read_to_string(".github/release-notes/v0.4.3.md").expect("release notes");
-    assert!(release_notes.contains("TUI Container Exec"));
-    assert!(release_notes.contains("docker exec -it <container> sh"));
+        fs::read_to_string(".github/release-notes/v0.4.4.md").expect("release notes");
+    assert!(release_notes.contains("Exec Picker"));
+    assert!(release_notes.contains("Safe Update Flow"));
 }
 
 #[test]
