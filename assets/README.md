@@ -2,6 +2,7 @@
 
 推荐文件：
 
+- `hugdocker-logo.png`：README 顶部品牌 Logo
 - `screenshot.png`：README 顶部 TUI 截图
 - `demo.gif`：可选，展示过滤、多选、风险预演
 

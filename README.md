@@ -2,6 +2,8 @@
 
 <div align="center">
 
+<img src="assets/hugdocker-logo.png" alt="hugdocker logo" width="760">
+
 **Project-first Docker operations cockpit for Linux terminals.**
 
 面向 Linux 日常运维的高性能 Docker TUI/CLI。以项目为中心聚合 Compose、Stack 和 standalone 容器，提供资源监控、风险预演、安全执行、异常恢复、审计时间线和脚本化 JSON 输出。
