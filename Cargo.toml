@@ -5,9 +5,9 @@ edition = "2024"
 description = "Fast project-first Docker TUI/CLI for Linux daily operations"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/badwichell007/dockerctl"
-homepage = "https://github.com/badwichell007/dockerctl"
-documentation = "https://github.com/badwichell007/dockerctl#readme"
+repository = "https://github.com/badwichell007/hugdocker"
+homepage = "https://github.com/badwichell007/hugdocker"
+documentation = "https://github.com/badwichell007/hugdocker#readme"
 keywords = ["docker", "tui", "cli", "linux", "ops"]
 categories = ["command-line-utilities"]
 

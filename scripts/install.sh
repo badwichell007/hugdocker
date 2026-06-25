@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${HUGDOCKER_REPO:-${DOCKERCTL_REPO:-badwichell007/dockerctl}}"
+REPO="${HUGDOCKER_REPO:-${DOCKERCTL_REPO:-badwichell007/hugdocker}}"
 BIN_NAME="hugdocker"
 DEST_DIR="${HUGDOCKER_INSTALL_DIR:-${DOCKERCTL_INSTALL_DIR:-${XDG_BIN_HOME:-$HOME/.local/bin}}}"
 VERSION="${HUGDOCKER_VERSION:-${DOCKERCTL_VERSION:-latest}}"

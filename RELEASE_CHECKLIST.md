@@ -5,10 +5,10 @@
 1. 替换仓库路径
 
 ```bash
-rg "badwichell007/dockerctl"
+rg "badwichell007/hugdocker"
 ```
 
-确认 README、`Cargo.toml` 和 `scripts/install.sh` 中的仓库路径都指向当前实际仓库 `badwichell007/dockerctl`。
+确认 README、`Cargo.toml` 和 `scripts/install.sh` 中的仓库路径都指向当前实际仓库 `badwichell007/hugdocker`。
 
 2. 准备截图
 
@@ -67,6 +67,6 @@ GitHub Actions 会构建 Linux x86_64/aarch64 release 包。
 7. 验证一行安装
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/badwichell007/dockerctl/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/badwichell007/hugdocker/main/scripts/install.sh | bash
 hugdocker --help
 ```
