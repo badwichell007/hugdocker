@@ -158,6 +158,17 @@ fn doctor_reports_ports_public_bind_restart_loop_and_anonymous_volume() {
         shop_fingerprint.suggested_command,
         "hugdocker rescue shop --dry-run"
     );
+    let api_fingerprint = fingerprints
+        .iter()
+        .find(|fingerprint| fingerprint.project == "api")
+        .expect("api fingerprint");
+    assert!(
+        api_fingerprint
+            .signals
+            .iter()
+            .any(|signal| signal == "port_conflict:8080")
+    );
+    assert!(api_fingerprint.risk_score >= 15);
 }
 
 #[test]

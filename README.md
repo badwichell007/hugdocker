@@ -7,7 +7,7 @@
 面向 Linux 日常运维的高性能 Docker TUI/CLI。以项目为中心聚合 Compose、Stack 和 standalone 容器，提供资源监控、风险预演、安全执行、异常恢复、审计时间线和脚本化 JSON 输出。
 
 [![CI](https://github.com/badwichell007/dockerctl/actions/workflows/ci.yml/badge.svg)](https://github.com/badwichell007/dockerctl/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/badge/release-v0.4.0-0ea5e9)](https://github.com/badwichell007/dockerctl/releases)
+[![Release](https://img.shields.io/badge/release-v0.4.1-0ea5e9)](https://github.com/badwichell007/dockerctl/releases)
 [![Rust](https://img.shields.io/badge/Rust-2024-f97316)](https://www.rust-lang.org/)
 [![TUI](https://img.shields.io/badge/TUI-ratatui%20%2B%20crossterm-22c55e)](https://ratatui.rs/)
 [![Docker API](https://img.shields.io/badge/Docker%20API-bollard-2563eb)](https://github.com/fussybeaver/bollard)
@@ -120,7 +120,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ### 指定版本
 
 ```bash
-HUGDOCKER_VERSION=v0.4.0 curl -fsSL https://raw.githubusercontent.com/badwichell007/dockerctl/main/scripts/install.sh | bash
+HUGDOCKER_VERSION=v0.4.1 curl -fsSL https://raw.githubusercontent.com/badwichell007/dockerctl/main/scripts/install.sh | bash
 ```
 
 ### 源码安装
@@ -695,6 +695,11 @@ OperationAction -> OperationPlan -> Confirmation -> Executor -> Audit
 - 优先做好本地 Docker 运维，不把项目扩张成复杂平台。
 
 ## 更新日志
+
+### v0.4.1
+
+- Ops Fingerprint 现在会把跨项目端口冲突归因到每个相关项目，输出 `port_conflict:<port>` 信号。
+- 端口冲突会进入风险分计算，并通过 `doctor`、`health --json`、TUI Doctor 和 Ops Inbox 同步呈现。
 
 ### v0.4.0
 

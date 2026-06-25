@@ -140,6 +140,7 @@ pub fn global_findings(snapshot: &DockerSnapshot) -> Vec<String> {
 
 pub fn project_fingerprints(snapshot: &DockerSnapshot) -> Vec<ProjectFingerprint> {
     let health = analyze_snapshot(snapshot);
+    let port_conflicts = project_port_conflicts(snapshot);
     let mut fingerprints = snapshot
         .projects
         .iter()
@@ -162,6 +163,11 @@ pub fn project_fingerprints(snapshot: &DockerSnapshot) -> Vec<ProjectFingerprint
             }
             if project.images.len() >= 5 {
                 signals.push("image_bloat".to_string());
+            }
+            if let Some(ports) = port_conflicts.get(&project.name) {
+                for port in ports {
+                    signals.push(format!("port_conflict:{port}"));
+                }
             }
             signals.sort();
             signals.dedup();
@@ -206,6 +212,11 @@ fn project_risk_score(project: &crate::domain::Project, signals: &[String]) -> u
         .filter(|signal| *signal == "image_bloat")
         .count() as u16
         * 6;
+    score += signals
+        .iter()
+        .filter(|signal| signal.starts_with("port_conflict:"))
+        .count() as u16
+        * 15;
     score.min(100)
 }
 
@@ -238,6 +249,31 @@ fn has_duplicate_ports(ports: &[String]) -> bool {
 fn host_port_key(port: &str) -> Option<String> {
     let (host, _) = port.split_once("->")?;
     Some(host.rsplit(':').next().unwrap_or(host).to_string())
+}
+
+fn project_port_conflicts(snapshot: &DockerSnapshot) -> BTreeMap<String, Vec<String>> {
+    let mut by_port: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for project in &snapshot.projects {
+        for port in &project.ports {
+            if let Some(host_port) = host_port_key(port) {
+                by_port
+                    .entry(host_port)
+                    .or_default()
+                    .insert(project.name.clone());
+            }
+        }
+    }
+
+    let mut by_project: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (port, projects) in by_port {
+        if projects.len() <= 1 {
+            continue;
+        }
+        for project in projects {
+            by_project.entry(project).or_default().push(port.clone());
+        }
+    }
+    by_project
 }
 
 fn is_default_network(network: &str) -> bool {
